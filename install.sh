@@ -347,7 +347,7 @@ install_panel_files() {
     step "Installing XCASPER Panel"
 
     PANEL_DIR="/var/www/xcasper-panel"
-    PTERO_VERSION="v1.11.10"  # Tested Pterodactyl base version
+    PTERO_VERSION="v1.12.1"   # Latest stable Pterodactyl base
 
     # ── Step 1: Clone Pterodactyl base (public repo, no auth needed) ──
     if [[ -d "$PANEL_DIR/.git" ]]; then

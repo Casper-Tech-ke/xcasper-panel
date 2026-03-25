@@ -291,22 +291,9 @@ collect_panel_inputs() {
     [[ "${CONFIRM,,}" != "y" ]] && error "Installation cancelled."
 }
 
-# ── Collect Wings inputs ─────────────────────────────────────
+# ── Collect Wings inputs (kept for compatibility — prompts moved to post-install)
 collect_wings_inputs() {
-    step "Wings Configuration"
-    divider
-
-    ask "Panel URL — full URL including https:// (e.g. https://panel.yourdomain.com):"
-    read -r PANEL_URL
-    [[ -z "$PANEL_URL" ]] && error "Panel URL cannot be empty."
-    PANEL_URL="${PANEL_URL%/}"
-
-    ask "Wings token (from Panel → Admin → Nodes → Configuration — leave blank to set later):"
-    read -r WINGS_TOKEN
-    if [[ -z "$WINGS_TOKEN" ]]; then
-        warn "Token left blank — add it to /etc/pterodactyl/config.yml before starting Wings."
-        WINGS_TOKEN="REPLACE_WITH_YOUR_TOKEN"
-    fi
+    : # All prompts now happen in wings_post_install after the binary is installed
 }
 
 # ── Install dependencies ─────────────────────────────────────
@@ -1108,54 +1095,185 @@ install_wings() {
 
     create_wings_user
 
+    # ── Docker ───────────────────────────────────────────────
     info "Installing Docker..."
     if ! command -v docker &>/dev/null; then
-        curl -fsSL https://get.docker.com | bash >/dev/null 2>&1
-        systemctl enable docker
-        systemctl start docker
+        curl -fsSL https://get.docker.com | CHANNEL=stable bash >/dev/null 2>&1
+        systemctl enable --now docker >/dev/null 2>&1
     fi
     DOCKER_VER=$(docker --version | awk '{print $3}' | tr -d ',')
     success "Docker $DOCKER_VER"
-
-    info "Adding pterodactyl user to docker group..."
     usermod -aG docker pterodactyl 2>/dev/null || true
 
+    # ── GRUB swap/memory accounting (required by Docker cgroups) ─
+    GRUB_FILE="/etc/default/grub"
+    if [[ -f "$GRUB_FILE" ]]; then
+        if ! grep -q "swapaccount=1" "$GRUB_FILE"; then
+            info "Enabling swap memory accounting in GRUB..."
+            sed -i 's/^GRUB_CMDLINE_LINUX_DEFAULT=.*/GRUB_CMDLINE_LINUX_DEFAULT="swapaccount=1"/' "$GRUB_FILE"
+            update-grub >/dev/null 2>&1 || \
+                grub2-mkconfig -o /boot/grub2/grub.cfg >/dev/null 2>&1 || true
+            success "GRUB updated — swap accounting enabled (active after reboot)"
+        else
+            info "GRUB swap accounting already enabled"
+        fi
+    fi
+
+    # ── Architecture detection ────────────────────────────────
+    ARCH=$(uname -m)
+    [[ "$ARCH" == "aarch64" || "$ARCH" == "arm64" ]] && ARCH="arm64" || ARCH="amd64"
+    info "Detected architecture: $ARCH"
+
+    # ── Wings binary — XCASPER build first, fall back to official ──
     info "Downloading XCASPER Wings binary..."
     mkdir -p /etc/pterodactyl
 
-    # ── Try our custom Wings release first; fall back to official Pterodactyl ──
     XCASPER_WINGS_RELEASE=$(curl -sf \
         "https://api.github.com/repos/Casper-Tech-ke/xcasper-wings/releases/latest" \
         | grep '"tag_name"' | cut -d '"' -f4 || true)
 
     if [[ -n "$XCASPER_WINGS_RELEASE" ]]; then
         info "Found XCASPER Wings release: $XCASPER_WINGS_RELEASE"
-        WINGS_URL="https://github.com/Casper-Tech-ke/xcasper-wings/releases/download/${XCASPER_WINGS_RELEASE}/wings_linux_amd64"
+        WINGS_URL="https://github.com/Casper-Tech-ke/xcasper-wings/releases/download/${XCASPER_WINGS_RELEASE}/wings_linux_${ARCH}"
         WINGS_VERSION="$XCASPER_WINGS_RELEASE"
     else
-        info "No XCASPER Wings release found — using official Pterodactyl Wings..."
+        info "No XCASPER custom release found — using official Pterodactyl Wings..."
         WINGS_VERSION=$(curl -s "https://api.github.com/repos/pterodactyl/wings/releases/latest" \
             | grep '"tag_name"' | cut -d '"' -f4)
-        WINGS_URL="https://github.com/pterodactyl/wings/releases/download/${WINGS_VERSION}/wings_linux_amd64"
+        WINGS_URL="https://github.com/pterodactyl/wings/releases/download/${WINGS_VERSION}/wings_linux_${ARCH}"
     fi
 
     curl -fsSL "$WINGS_URL" -o /usr/local/bin/wings
     chmod +x /usr/local/bin/wings
-    success "Wings $WINGS_VERSION installed at /usr/local/bin/wings"
+    success "Wings $WINGS_VERSION installed at /usr/local/bin/wings [$ARCH]"
 
-    WINGS_UUID=$(cat /proc/sys/kernel/random/uuid)
+    # ── Self-signed SSL cert for Wings API port 8080 ─────────
+    info "Generating Wings API SSL certificate..."
+    mkdir -p /etc/certs/wing
+    openssl req -new -newkey rsa:4096 -days 3650 -nodes -x509 \
+        -subj "/C=NA/ST=NA/L=NA/O=XCASPER Hosting/CN=Wings SSL" \
+        -keyout /etc/certs/wing/privkey.pem \
+        -out    /etc/certs/wing/fullchain.pem >/dev/null 2>&1
+    success "SSL certificate generated at /etc/certs/wing/"
 
-    cat > /etc/pterodactyl/config.yml << WCONF
+    # ── Systemd service ───────────────────────────────────────
+    cat > /etc/systemd/system/wings.service << SERVICE
+[Unit]
+Description=XCASPER Wings Daemon
+After=docker.service
+Requires=docker.service
+PartOf=docker.service
+
+[Service]
+User=root
+WorkingDirectory=/etc/pterodactyl
+LimitNOFILE=4096
+PIDFile=/var/run/wings/daemon.pid
+ExecStart=/usr/local/bin/wings
+Restart=on-failure
+RestartSec=5s
+StartLimitInterval=180
+StartLimitBurst=30
+StandardOutput=syslog
+StandardError=syslog
+SyslogIdentifier=xcasper-wings
+
+[Install]
+WantedBy=multi-user.target
+SERVICE
+
+    systemctl daemon-reload
+    systemctl enable wings >/dev/null 2>&1
+    success "Wings service enabled"
+
+    # ── 'wing' helper command ─────────────────────────────────
+    cat > /usr/local/bin/wing << 'WINGHELPER'
+#!/bin/bash
+C='\033[1;36m' Y='\033[1;33m' G='\033[1;32m' NC='\033[0m'
+echo -e "${C}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo -e "${Y}  XCASPER Wings Quick Reference${NC}"
+echo -e "${C}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo -e "${C}Start:${NC}    ${G}sudo systemctl start wings${NC}"
+echo -e "${C}Stop:${NC}     ${G}sudo systemctl stop wings${NC}"
+echo -e "${C}Restart:${NC}  ${G}sudo systemctl restart wings${NC}"
+echo -e "${C}Status:${NC}   ${G}sudo systemctl status wings${NC}"
+echo -e "${C}Logs:${NC}     ${G}sudo journalctl -u wings -f${NC}"
+echo -e "${C}Config:${NC}   ${G}nano /etc/pterodactyl/config.yml${NC}"
+echo -e "${Y}  Port 8080 must be open and reachable from the panel.${NC}"
+echo -e "${C}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+WINGHELPER
+    chmod +x /usr/local/bin/wing
+    success "'wing' helper installed — type 'wing' anytime for quick commands"
+
+    # ── Post-install: prompt to auto-configure ────────────────
+    wings_post_install
+}
+
+# ── Wings post-install auto-configure prompt ──────────────────
+wings_post_install() {
+    echo ""
+    divider
+    echo -e "${GREEN}${BOLD}  Wings Installed Successfully!${NC}"
+    echo ""
+    echo -e "  ${YELLOW}${BOLD}Next Steps:${NC}"
+    echo -e "  ${CYAN}1.${NC} In your ${BOLD}Panel Admin → Nodes → [your node] → Configuration${NC} tab"
+    echo -e "     you will find the ${BOLD}UUID${NC}, ${BOLD}Token ID${NC} and ${BOLD}Token${NC} for this node."
+    echo -e "  ${CYAN}2.${NC} Come back here — we will write the config file for you right now."
+    echo -e "  ${CYAN}3.${NC} Type ${BOLD}wing${NC} anytime to see quick commands."
+    echo ""
+    divider
+    echo ""
+    ask "Auto-configure Wings with your panel token now? [y/N]:"
+    read -r WINGS_AUTO
+
+    if [[ "${WINGS_AUTO,,}" == "y" ]]; then
+        echo ""
+        echo -e "  ${DIM}Find these values at: Panel Admin → Nodes → [node] → Configuration tab${NC}"
+        echo ""
+
+        ask "Panel URL (e.g. https://panel.xcasper.space):"
+        read -r WINGS_REMOTE
+        WINGS_REMOTE="${WINGS_REMOTE%/}"
+        if [[ -z "$WINGS_REMOTE" ]]; then
+            warn "Panel URL is required — skipping auto-config."
+            wings_show_manual; return
+        fi
+
+        ask "Node UUID (from Configuration tab — press Enter to auto-generate):"
+        read -r WINGS_UUID_INPUT
+        WINGS_UUID="${WINGS_UUID_INPUT:-$(cat /proc/sys/kernel/random/uuid)}"
+        [[ -z "$WINGS_UUID_INPUT" ]] && info "Auto-generated UUID: $WINGS_UUID"
+
+        ask "Token ID (from Configuration tab):"
+        read -r WINGS_TOKEN_ID
+        if [[ -z "$WINGS_TOKEN_ID" ]]; then
+            warn "Token ID is required — skipping auto-config."
+            wings_show_manual; return
+        fi
+
+        ask "Token (from Configuration tab — input is hidden):"
+        read -rs WINGS_TOKEN_VAL
+        echo ""
+        if [[ -z "$WINGS_TOKEN_VAL" ]]; then
+            warn "Token is required — skipping auto-config."
+            wings_show_manual; return
+        fi
+
+        info "Writing /etc/pterodactyl/config.yml..."
+        mkdir -p /etc/pterodactyl
+        cat > /etc/pterodactyl/config.yml << WCONF
 debug: false
 uuid: "${WINGS_UUID}"
-token_id: ""
-token: "${WINGS_TOKEN}"
-remote: "${PANEL_URL}"
+token_id: "${WINGS_TOKEN_ID}"
+token: "${WINGS_TOKEN_VAL}"
+remote: "${WINGS_REMOTE}"
 api:
   host: "0.0.0.0"
   port: 8080
   ssl:
-    enabled: false
+    enabled: true
+    cert: /etc/certs/wing/fullchain.pem
+    key: /etc/certs/wing/privkey.pem
   upload_limit: 100
 system:
   root_directory: /var/lib/pterodactyl
@@ -1198,42 +1316,50 @@ cache:
 allowed_mounts: []
 allowed_origins: []
 WCONF
+        success "Configuration saved to /etc/pterodactyl/config.yml"
 
-    success "Wings configuration written to /etc/pterodactyl/config.yml"
-
-    cat > /etc/systemd/system/wings.service << SERVICE
-[Unit]
-Description=XCASPER Wings Daemon
-After=docker.service
-Requires=docker.service
-
-[Service]
-User=root
-WorkingDirectory=/etc/pterodactyl
-ExecStart=/usr/local/bin/wings
-Restart=on-failure
-RestartSec=5
-StartLimitInterval=180
-StartLimitBurst=30
-LimitNOFILE=4096
-StandardOutput=syslog
-StandardError=syslog
-SyslogIdentifier=wings
-
-[Install]
-WantedBy=multi-user.target
-SERVICE
-
-    systemctl daemon-reload
-    systemctl enable wings
-
-    if [[ "$WINGS_TOKEN" != "REPLACE_WITH_YOUR_TOKEN" ]]; then
+        info "Starting Wings daemon..."
         systemctl start wings
-        success "Wings daemon started"
+        sleep 3
+
+        WINGS_LIVE=$(systemctl is-active wings 2>/dev/null)
+        if [[ "$WINGS_LIVE" == "active" ]]; then
+            success "Wings is running!"
+        else
+            warn "Wings may not have started cleanly — check logs:"
+            echo -e "     ${BOLD}journalctl -u wings -f${NC}"
+        fi
+
+        echo ""
+        divider
+        echo -e "${GREEN}${BOLD}  Wings auto-configuration complete!${NC}"
+        echo ""
+        echo -e "  ${CYAN}Status:${NC}  ${BOLD}systemctl status wings${NC}"
+        echo -e "  ${CYAN}Logs:${NC}    ${BOLD}journalctl -u wings -f${NC}"
+        echo -e "  ${CYAN}Helper:${NC}  Type ${BOLD}wing${NC} anytime for quick commands"
+        echo ""
+        divider
     else
-        warn "Wings NOT started — add your real token to /etc/pterodactyl/config.yml"
-        warn "Then run: systemctl start wings"
+        wings_show_manual
     fi
+}
+
+# ── Wings manual config instructions ─────────────────────────
+wings_show_manual() {
+    echo ""
+    divider
+    echo -e "${YELLOW}${BOLD}  Manual Wings Configuration${NC}"
+    echo ""
+    echo -e "  ${CYAN}1.${NC} Go to your panel → Admin → Nodes → [your node] → Configuration tab"
+    echo -e "  ${CYAN}2.${NC} Copy the values and edit the config file:"
+    echo -e "     ${BOLD}nano /etc/pterodactyl/config.yml${NC}"
+    echo -e "  ${CYAN}3.${NC} Set ${BOLD}uuid${NC}, ${BOLD}token_id${NC}, ${BOLD}token${NC} and ${BOLD}remote${NC} from the panel"
+    echo -e "  ${CYAN}4.${NC} Start Wings:"
+    echo -e "     ${BOLD}systemctl start wings${NC}"
+    echo ""
+    echo -e "  Type ${BOLD}wing${NC} anytime for a quick command reference."
+    echo ""
+    divider
 }
 
 # ── Post-install next-steps guidance ─────────────────────────
@@ -1682,7 +1808,9 @@ menu_uninstall() {
             rm -rf /etc/pterodactyl
             rm -rf /var/lib/pterodactyl
             rm -rf /var/log/pterodactyl
+            rm -rf /etc/certs/wing
             rm -f /usr/local/bin/wings
+            rm -f /usr/local/bin/wing
             success "Wings removed"
         }
 

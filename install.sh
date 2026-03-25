@@ -53,28 +53,80 @@ check_root() {
     fi
 }
 
-# ── OS check ────────────────────────────────────────────────
+# ── OS detection + check ────────────────────────────────────
 check_os() {
     step "Checking Operating System"
+
     if [[ ! -f /etc/os-release ]]; then
-        error "Cannot determine OS. Ubuntu 20.04 / 22.04 / 24.04 required."
+        error "Cannot read /etc/os-release. Supported: Ubuntu 20-24, Debian 11-12."
     fi
 
     # shellcheck disable=SC1091
     source /etc/os-release
-    OS_NAME="${ID:-}"
-    OS_VERSION="${VERSION_ID:-}"
+    OS_NAME="${ID:-unknown}"
+    OS_VERSION="${VERSION_ID:-unknown}"
+    OS_CODENAME="${VERSION_CODENAME:-}"
+    OS_PRETTY="${PRETTY_NAME:-$OS_NAME $OS_VERSION}"
 
-    if [[ "$OS_NAME" != "ubuntu" ]]; then
-        error "Only Ubuntu is supported. Detected: $OS_NAME $OS_VERSION"
+    # Determine package manager family
+    if command -v apt-get &>/dev/null; then
+        PKG_FAMILY="apt"
+    elif command -v dnf &>/dev/null; then
+        PKG_FAMILY="dnf"
+    elif command -v yum &>/dev/null; then
+        PKG_FAMILY="yum"
+    else
+        PKG_FAMILY="unknown"
     fi
 
-    case "$OS_VERSION" in
-        20.04|22.04|24.04)
-            success "Ubuntu $OS_VERSION — supported"
+    export OS_NAME OS_VERSION OS_CODENAME OS_PRETTY PKG_FAMILY
+
+    case "$OS_NAME" in
+        ubuntu)
+            case "$OS_VERSION" in
+                20.04|22.04|24.04)
+                    success "Ubuntu $OS_VERSION ($OS_CODENAME) — fully supported ✓"
+                    ;;
+                *)
+                    warn "Ubuntu $OS_VERSION is not officially tested. Proceeding..."
+                    ;;
+            esac
+            ;;
+        debian)
+            case "$OS_VERSION" in
+                11|12)
+                    success "Debian $OS_VERSION ($OS_CODENAME) — fully supported ✓"
+                    ;;
+                10)
+                    warn "Debian 10 (Buster) is end-of-life. Upgrade to Debian 12 is recommended."
+                    warn "Proceeding — some packages may be outdated."
+                    ;;
+                *)
+                    warn "Debian $OS_VERSION is not officially tested. Proceeding..."
+                    ;;
+            esac
+            ;;
+        almalinux|rocky|centos|rhel|ol)
+            warn "Detected: $OS_PRETTY"
+            warn "Pterodactyl does NOT officially support RPM-based distros."
+            warn "The installer will attempt to proceed using the Remi PHP repo."
+            ask "Continue anyway? [y/N]:"
+            read -r OS_CONFIRM
+            [[ "${OS_CONFIRM,,}" != "y" ]] && \
+                error "Cancelled. Use Ubuntu 22.04 or Debian 12 for guaranteed compatibility."
+            ;;
+        fedora)
+            warn "Fedora detected. Community-supported only. Proceeding..."
             ;;
         *)
-            warn "Ubuntu $OS_VERSION is not officially tested. Continuing anyway..."
+            warn "Unknown OS: $OS_PRETTY (PKG family: $PKG_FAMILY)"
+            warn "Only Ubuntu 20-24 and Debian 11-12 are officially supported."
+            if [[ "$PKG_FAMILY" == "unknown" ]]; then
+                error "No supported package manager found (apt/dnf/yum). Cannot continue."
+            fi
+            ask "Continue at your own risk? [y/N]:"
+            read -r OS_CONFIRM
+            [[ "${OS_CONFIRM,,}" != "y" ]] && error "Cancelled."
             ;;
     esac
 }
@@ -261,103 +313,200 @@ collect_wings_inputs() {
 install_dependencies() {
     step "Installing System Dependencies"
 
-    export DEBIAN_FRONTEND=noninteractive
+    # ── APT-based (Ubuntu / Debian) ──────────────────────────
+    if [[ "${PKG_FAMILY:-apt}" == "apt" ]]; then
+        export DEBIAN_FRONTEND=noninteractive
+        CODENAME="${OS_CODENAME:-$(lsb_release -cs 2>/dev/null)}"
 
-    info "Updating package list..."
-    apt-get update -y -qq
+        info "Updating package list..."
+        apt-get update -y -qq
 
-    info "Installing core packages..."
-    apt-get install -y -qq \
-        curl wget git unzip tar \
-        software-properties-common \
-        apt-transport-https ca-certificates \
-        gnupg lsb-release ufw \
-        nginx certbot python3-certbot-nginx \
-        redis-server \
-        dnsutils
+        info "Installing core packages..."
+        apt-get install -y -qq \
+            curl wget git unzip tar \
+            software-properties-common \
+            apt-transport-https ca-certificates \
+            gnupg lsb-release ufw \
+            nginx certbot python3-certbot-nginx \
+            redis-server dnsutils
 
-    # PHP 8.3 — add repo for Ubuntu (Ondrej PPA) or Debian (SURY)
-    info "Adding PHP 8.3 repository..."
-    OS_ID=$(lsb_release -is 2>/dev/null | tr '[:upper:]' '[:lower:]')
-    if [[ "$OS_ID" == "ubuntu" ]]; then
-        PHP_LIST="/etc/apt/sources.list.d/ondrej-ubuntu-php-$(lsb_release -cs).list"
-        if [[ ! -f "$PHP_LIST" ]]; then
-            LC_ALL=C.UTF-8 add-apt-repository -y ppa:ondrej/php
-            apt-get update -y -qq
+        # PHP 8.3 repo
+        info "Adding PHP 8.3 repository..."
+        case "$OS_NAME" in
+            ubuntu)
+                PHP_LIST="/etc/apt/sources.list.d/ondrej-ubuntu-php-${CODENAME}.list"
+                if [[ ! -f "$PHP_LIST" ]]; then
+                    LC_ALL=C.UTF-8 add-apt-repository -y ppa:ondrej/php
+                    apt-get update -y -qq
+                fi
+                ;;
+            debian|*)
+                if [[ ! -f "/etc/apt/sources.list.d/sury-php.list" ]]; then
+                    curl -fsSL https://packages.sury.org/php/apt.gpg \
+                        | gpg --dearmor -o /usr/share/keyrings/sury-php.gpg
+                    echo "deb [signed-by=/usr/share/keyrings/sury-php.gpg] \
+https://packages.sury.org/php/ ${CODENAME} main" \
+                        | tee /etc/apt/sources.list.d/sury-php.list > /dev/null
+                    apt-get update -y -qq
+                fi
+                ;;
+        esac
+
+        info "Installing PHP 8.3 and extensions..."
+        apt-get install -y -qq \
+            php8.3 php8.3-fpm php8.3-cli php8.3-mysql \
+            php8.3-mbstring php8.3-xml php8.3-curl \
+            php8.3-zip php8.3-gd php8.3-bcmath \
+            php8.3-intl php8.3-tokenizer php8.3-fileinfo \
+            php8.3-redis php8.3-posix
+        success "PHP $(php -r 'echo PHP_VERSION;')"
+
+        # Database — prefer mysql-server, fall back to mariadb-server
+        info "Installing database server..."
+        if apt-cache show mysql-server &>/dev/null 2>&1; then
+            apt-get install -y -qq mysql-server
+            DB_SERVICE="mysql"
+            success "MySQL installed"
+        else
+            apt-get install -y -qq mariadb-server
+            DB_SERVICE="mariadb"
+            success "MariaDB installed"
         fi
-    elif [[ "$OS_ID" == "debian" ]]; then
-        if [[ ! -f "/etc/apt/sources.list.d/sury-php.list" ]]; then
-            curl -fsSL https://packages.sury.org/php/apt.gpg \
-                | gpg --dearmor -o /usr/share/keyrings/sury-php.gpg
-            echo "deb [signed-by=/usr/share/keyrings/sury-php.gpg] https://packages.sury.org/php/ $(lsb_release -cs) main" \
-                | tee /etc/apt/sources.list.d/sury-php.list > /dev/null
-            apt-get update -y -qq
+        export DB_SERVICE
+
+        # Node.js 20
+        info "Installing Node.js 20..."
+        NODE_MAJOR=0
+        command -v node &>/dev/null && NODE_MAJOR=$(node -v | cut -d. -f1 | tr -d 'v')
+        if [[ "$NODE_MAJOR" -lt 18 ]]; then
+            curl -fsSL https://deb.nodesource.com/setup_20.x | bash - >/dev/null 2>&1
+            apt-get install -y -qq nodejs
         fi
+
+        # Services
+        info "Starting core services..."
+        systemctl enable redis-server 2>/dev/null && systemctl start redis-server 2>/dev/null || \
+            { systemctl enable redis 2>/dev/null && systemctl start redis 2>/dev/null; } || true
+        systemctl enable php8.3-fpm && systemctl start php8.3-fpm
+
+    # ── DNF/YUM-based (AlmaLinux / Rocky / CentOS / RHEL) ────
+    elif [[ "${PKG_FAMILY}" == "dnf" || "${PKG_FAMILY}" == "yum" ]]; then
+        PM="${PKG_FAMILY}"
+        export RHEL_MAJOR
+        RHEL_MAJOR=$(rpm -E '%{rhel}' 2>/dev/null || echo "9")
+
+        info "Updating packages..."
+        $PM update -y -q
+
+        info "Installing EPEL and core tools..."
+        $PM install -y epel-release 2>/dev/null || \
+            $PM install -y \
+                "https://dl.fedoraproject.org/pub/epel/epel-release-latest-${RHEL_MAJOR}.noarch.rpm" \
+                2>/dev/null || true
+        $PM install -y curl wget git unzip tar gnupg2 \
+            ca-certificates ufw nginx certbot python3-certbot-nginx \
+            redis dnsutils 2>/dev/null || true
+
+        # PHP 8.3 via Remi
+        info "Adding Remi PHP 8.3 repository..."
+        if ! rpm -q remi-release &>/dev/null; then
+            $PM install -y \
+                "https://rpms.remirepo.net/enterprise/remi-release-${RHEL_MAJOR}.rpm" \
+                2>/dev/null || \
+            $PM install -y \
+                "https://rpms.remirepo.net/fedora/remi-release-$(rpm -E '%{fedora}').rpm" \
+                2>/dev/null || true
+        fi
+        $PM module reset php -y 2>/dev/null || true
+        $PM module enable php:remi-8.3 -y 2>/dev/null || true
+        $PM install -y php php-fpm php-mysqlnd php-mbstring php-xml \
+            php-curl php-zip php-gd php-bcmath php-intl \
+            php-tokenizer php-json php-redis 2>/dev/null || true
+        success "PHP $(php -r 'echo PHP_VERSION;' 2>/dev/null || echo 'installed')"
+
+        # MariaDB
+        info "Installing MariaDB..."
+        $PM install -y mariadb-server 2>/dev/null || true
+        DB_SERVICE="mariadb"
+        export DB_SERVICE
+        systemctl enable mariadb && systemctl start mariadb || true
+
+        # Node.js 20
+        info "Installing Node.js 20..."
+        curl -fsSL https://rpm.nodesource.com/setup_20.x | bash - >/dev/null 2>&1
+        $PM install -y nodejs 2>/dev/null || true
+
+        # Services
+        info "Starting core services..."
+        systemctl enable redis 2>/dev/null && systemctl start redis 2>/dev/null || true
+        systemctl enable php-fpm 2>/dev/null && systemctl start php-fpm 2>/dev/null || true
     fi
 
-    info "Installing PHP 8.3 and all required extensions..."
-    apt-get install -y -qq \
-        php8.3 php8.3-fpm php8.3-cli php8.3-mysql \
-        php8.3-mbstring php8.3-xml php8.3-curl \
-        php8.3-zip php8.3-gd php8.3-bcmath \
-        php8.3-intl php8.3-tokenizer php8.3-fileinfo \
-        php8.3-redis php8.3-posix
-
-    # MySQL
-    info "Installing MySQL..."
-    apt-get install -y -qq mysql-server
-
-    # Composer
+    # ── Universal: Composer ───────────────────────────────────
     info "Installing Composer..."
     if ! command -v composer &>/dev/null; then
         curl -sS https://getcomposer.org/installer \
             | php -- --install-dir=/usr/local/bin --filename=composer --quiet
     fi
-    COMPOSER_VERSION=$(composer --version --no-ansi 2>/dev/null | awk '{print $3}')
-    success "Composer $COMPOSER_VERSION"
+    success "Composer $(composer --version --no-ansi 2>/dev/null | awk '{print $3}')"
 
-    # Node.js 20
-    info "Installing Node.js 20..."
-    NODE_MAJOR=0
-    if command -v node &>/dev/null; then
-        NODE_MAJOR=$(node -v | cut -d. -f1 | tr -d 'v')
-    fi
-    if [[ "$NODE_MAJOR" -lt 18 ]]; then
-        curl -fsSL https://deb.nodesource.com/setup_20.x | bash - >/dev/null 2>&1
-        apt-get install -y -qq nodejs
-    fi
-    success "Node $(node -v)"
-
-    # Yarn
+    # ── Universal: Yarn ───────────────────────────────────────
     info "Installing Yarn..."
     npm install -g yarn --quiet
-    success "Yarn $(yarn --version)"
+    success "Yarn $(yarn --version 2>/dev/null)"
 
-    # Enable and start Redis + PHP-FPM
-    info "Starting services..."
-    systemctl enable redis-server && systemctl start redis-server
-    systemctl enable php8.3-fpm  && systemctl start php8.3-fpm
-
-    success "All dependencies installed and services running"
+    success "All dependencies installed"
 }
 
-# ── Setup MySQL ──────────────────────────────────────────────
+# ── Setup Database (MySQL or MariaDB) ────────────────────────
 setup_database() {
     step "Setting Up Database"
 
-    info "Starting MySQL..."
-    systemctl enable mysql
-    systemctl start mysql
+    # Use the DB_SERVICE detected during install_dependencies
+    # Fall back to auto-detect if install_dependencies wasn't called
+    if [[ -z "${DB_SERVICE:-}" ]]; then
+        if systemctl list-unit-files 2>/dev/null | grep -q "^mysql.service"; then
+            DB_SERVICE="mysql"
+        elif systemctl list-unit-files 2>/dev/null | grep -q "^mariadb.service"; then
+            DB_SERVICE="mariadb"
+        else
+            DB_SERVICE="mysql"
+        fi
+        export DB_SERVICE
+    fi
 
-    # Wait for MySQL socket to be ready
-    for i in {1..15}; do
-        mysqladmin ping --socket=/var/run/mysqld/mysqld.sock --silent 2>/dev/null && break
-        info "Waiting for MySQL to be ready... ($i/15)"
+    info "Starting ${DB_SERVICE}..."
+    systemctl enable "$DB_SERVICE" 2>/dev/null || true
+    systemctl start  "$DB_SERVICE" 2>/dev/null || true
+
+    # Wait for the DB to be ready (try multiple socket paths)
+    DB_READY=false
+    for i in {1..20}; do
+        if mysqladmin ping --silent 2>/dev/null; then
+            DB_READY=true; break
+        fi
+        for SOCK in /var/run/mysqld/mysqld.sock /run/mysqld/mysqld.sock \
+                    /var/lib/mysql/mysql.sock /run/mysql/mysql.sock; do
+            if [[ -S "$SOCK" ]] && mysqladmin ping --socket="$SOCK" --silent 2>/dev/null; then
+                DB_READY=true; break 2
+            fi
+        done
+        info "Waiting for ${DB_SERVICE} to be ready... ($i/20)"
         sleep 2
     done
 
+    if [[ "$DB_READY" != "true" ]]; then
+        warn "Database did not respond in time — attempting to continue anyway..."
+    fi
+
     info "Creating database and user..."
-    mysql -u root --socket=/var/run/mysqld/mysqld.sock << SQL
+    mysql -u root 2>/dev/null << SQL || \
+    mysql -u root -e "
+CREATE DATABASE IF NOT EXISTS xcasper_panel CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+DROP USER IF EXISTS 'xcasper'@'localhost';
+CREATE USER 'xcasper'@'localhost' IDENTIFIED BY '${DB_PASSWORD}';
+GRANT ALL PRIVILEGES ON xcasper_panel.* TO 'xcasper'@'localhost';
+FLUSH PRIVILEGES;" 2>/dev/null || true
 CREATE DATABASE IF NOT EXISTS xcasper_panel CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 DROP USER IF EXISTS 'xcasper'@'localhost';
 CREATE USER 'xcasper'@'localhost' IDENTIFIED BY '${DB_PASSWORD}';
@@ -470,15 +619,31 @@ configure_env() {
     success "Environment configured"
 }
 
+# ── Detect web server user (www-data on Debian/Ubuntu, nginx on RPM)
+detect_web_user() {
+    if id "www-data" &>/dev/null; then
+        WEB_USER="www-data"
+    elif id "nginx" &>/dev/null; then
+        WEB_USER="nginx"
+    elif id "apache" &>/dev/null; then
+        WEB_USER="apache"
+    else
+        WEB_USER="www-data"  # fallback, create if needed
+        useradd -r -s /sbin/nologin www-data 2>/dev/null || true
+    fi
+    export WEB_USER
+}
+
 # ── Set Permissions ───────────────────────────────────────────
 set_permissions() {
     step "Setting File Permissions"
+    detect_web_user
 
-    chown -R www-data:www-data /var/www/xcasper-panel
+    chown -R "${WEB_USER}:${WEB_USER}" /var/www/xcasper-panel
     chmod -R 755 /var/www/xcasper-panel
     chmod -R 700 /var/www/xcasper-panel/storage /var/www/xcasper-panel/bootstrap/cache
 
-    success "Permissions set"
+    success "Permissions set (owner: ${WEB_USER})"
 }
 
 # ── Create Admin User ─────────────────────────────────────────
@@ -506,7 +671,32 @@ configure_nginx() {
     # Stop any conflicting service on port 80
     systemctl stop apache2 2>/dev/null || true
 
-    cat > /etc/nginx/sites-available/xcasper-panel << NGINX
+    # Detect PHP-FPM socket (varies by OS and install method)
+    PHP_FPM_SOCK="/run/php/php8.3-fpm.sock"
+    for CANDIDATE in \
+            /run/php/php8.3-fpm.sock \
+            /var/run/php/php8.3-fpm.sock \
+            /run/php-fpm/www.sock \
+            /var/run/php-fpm/www.sock; do
+        if [[ -S "$CANDIDATE" ]]; then
+            PHP_FPM_SOCK="$CANDIDATE"
+            break
+        fi
+    done
+    info "PHP-FPM socket: $PHP_FPM_SOCK"
+
+    # Determine nginx vhost path (Debian/Ubuntu use sites-available, RPM uses conf.d)
+    if [[ -d /etc/nginx/sites-available ]]; then
+        NGINX_CONF="/etc/nginx/sites-available/xcasper-panel"
+        NGINX_ENABLED="/etc/nginx/sites-enabled/xcasper-panel"
+        USE_SITES_ENABLED=true
+    else
+        NGINX_CONF="/etc/nginx/conf.d/xcasper-panel.conf"
+        NGINX_ENABLED=""
+        USE_SITES_ENABLED=false
+    fi
+
+    cat > "$NGINX_CONF" << NGINX
 server {
     listen 80;
     listen [::]:80;
@@ -527,7 +717,7 @@ server {
     }
 
     location ~ \.php$ {
-        fastcgi_pass unix:/run/php/php8.3-fpm.sock;
+        fastcgi_pass unix:${PHP_FPM_SOCK};
         fastcgi_index index.php;
         include fastcgi_params;
         fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
@@ -542,8 +732,10 @@ server {
 }
 NGINX
 
-    ln -sf /etc/nginx/sites-available/xcasper-panel /etc/nginx/sites-enabled/xcasper-panel
-    rm -f /etc/nginx/sites-enabled/default
+    if [[ "$USE_SITES_ENABLED" == "true" ]]; then
+        ln -sf "$NGINX_CONF" "$NGINX_ENABLED"
+        rm -f /etc/nginx/sites-enabled/default
+    fi
 
     nginx -t && systemctl enable nginx && systemctl reload nginx
     success "Nginx configured for $PANEL_DOMAIN"
@@ -571,15 +763,18 @@ obtain_ssl() {
 # ── Setup Queue Worker ────────────────────────────────────────
 setup_queue_worker() {
     step "Setting Up Queue Worker (systemd)"
+    detect_web_user
 
+    DB_SVC="${DB_SERVICE:-mysql}"
+    # Service unit — variables expand from shell
     cat > /etc/systemd/system/xcasper-queue.service << SERVICE
 [Unit]
 Description=XCASPER Panel Queue Worker
-After=network.target mysql.service redis.service
+After=network.target ${DB_SVC}.service redis.service
 
 [Service]
-User=www-data
-Group=www-data
+User=${WEB_USER}
+Group=${WEB_USER}
 WorkingDirectory=/var/www/xcasper-panel
 ExecStart=/usr/bin/php /var/www/xcasper-panel/artisan queue:work --sleep=3 --tries=3 --max-time=3600
 Restart=always
@@ -596,21 +791,22 @@ SERVICE
     systemctl enable xcasper-queue
     systemctl start xcasper-queue
 
-    success "Queue worker running"
+    success "Queue worker running (user: ${WEB_USER})"
 }
 
 # ── Setup Cron ────────────────────────────────────────────────
 setup_cron() {
     step "Setting Up Scheduled Tasks (Cron)"
 
+    detect_web_user
     CRON_LINE="* * * * * php /var/www/xcasper-panel/artisan schedule:run >> /dev/null 2>&1"
-    EXISTING_CRON=$(crontab -l -u www-data 2>/dev/null || true)
+    EXISTING_CRON=$(crontab -l -u "${WEB_USER}" 2>/dev/null || true)
 
     if echo "$EXISTING_CRON" | grep -qF "artisan schedule:run"; then
         info "Cron job already present — skipping"
     else
-        printf '%s\n%s\n' "$EXISTING_CRON" "$CRON_LINE" | crontab -u www-data -
-        success "Cron job added for www-data"
+        printf '%s\n%s\n' "$EXISTING_CRON" "$CRON_LINE" | crontab -u "${WEB_USER}" -
+        success "Cron job added for ${WEB_USER}"
     fi
 }
 
@@ -1058,10 +1254,11 @@ _panel_create_user() {
         return
     fi
 
+    detect_web_user
     info "Running artisan user creation wizard..."
     echo ""
     cd "$PANEL_DIR"
-    sudo -u www-data php artisan p:user:make
+    sudo -u "${WEB_USER}" php artisan p:user:make
 
     success "User created successfully"
     echo ""
@@ -1091,10 +1288,11 @@ _panel_update() {
     read -r UP_CONFIRM
     [[ "${UP_CONFIRM,,}" != "y" ]] && { warn "Update cancelled."; read -rp "Press Enter..."; return; }
 
+    detect_web_user
     cd "$PANEL_DIR"
 
     info "Enabling maintenance mode..."
-    sudo -u www-data php artisan down
+    sudo -u "${WEB_USER}" php artisan down
 
     info "Pulling latest Pterodactyl base ($LATEST)..."
     curl -fsSL "https://github.com/pterodactyl/panel/releases/download/${LATEST}/panel.tar.gz" \
@@ -1115,23 +1313,23 @@ _panel_update() {
     COMPOSER_ALLOW_SUPERUSER=1 composer install --no-dev --optimize-autoloader --quiet
 
     info "Clearing caches..."
-    sudo -u www-data php artisan view:clear
-    sudo -u www-data php artisan config:clear
-    sudo -u www-data php artisan route:clear
+    sudo -u "${WEB_USER}" php artisan view:clear
+    sudo -u "${WEB_USER}" php artisan config:clear
+    sudo -u "${WEB_USER}" php artisan route:clear
 
     info "Running migrations..."
-    sudo -u www-data php artisan migrate --seed --force
+    sudo -u "${WEB_USER}" php artisan migrate --seed --force
 
     info "Setting permissions..."
     chmod -R 755 storage/* bootstrap/cache/
-    chown -R www-data:www-data "$PANEL_DIR"
+    chown -R "${WEB_USER}:${WEB_USER}" "$PANEL_DIR"
 
     info "Restarting queue worker..."
-    sudo -u www-data php artisan queue:restart
+    sudo -u "${WEB_USER}" php artisan queue:restart
     systemctl restart xcasper-queue 2>/dev/null || true
 
     info "Taking panel out of maintenance mode..."
-    sudo -u www-data php artisan up
+    sudo -u "${WEB_USER}" php artisan up
 
     success "Panel updated to $LATEST with XCASPER customizations"
     echo ""
@@ -1158,9 +1356,9 @@ _panel_uninstall() {
     rm -f /etc/systemd/system/xcasper-queue.service
     systemctl daemon-reload
 
-    crontab -l -u www-data 2>/dev/null \
+    crontab -l -u "${WEB_USER}" 2>/dev/null \
         | grep -v 'artisan schedule:run' \
-        | crontab -u www-data - 2>/dev/null || true
+        | crontab -u "${WEB_USER}" - 2>/dev/null || true
 
     rm -rf /var/www/xcasper-panel
     success "Panel files removed"
@@ -1220,9 +1418,9 @@ menu_uninstall() {
             rm -f /etc/systemd/system/xcasper-queue.service
             systemctl daemon-reload
 
-            crontab -l -u www-data 2>/dev/null \
+            crontab -l -u "${WEB_USER}" 2>/dev/null \
                 | grep -v 'artisan schedule:run' \
-                | crontab -u www-data - 2>/dev/null || true
+                | crontab -u "${WEB_USER}" - 2>/dev/null || true
 
             rm -rf /var/www/xcasper-panel
             success "Panel files removed"

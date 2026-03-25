@@ -218,6 +218,38 @@ collect_panel_inputs() {
     fi
 
     echo ""
+    step "Cloudflare (Optional — Recommended)"
+    divider
+    echo -e "  ${DIM}Automates DNS records, SSL/TLS settings, HTTPS redirect, and security.${NC}"
+    echo ""
+    ask "Do you use Cloudflare for this domain? [y/N]:"
+    read -r USE_CF
+    USE_CF="${USE_CF,,}"
+
+    if [[ "$USE_CF" == "y" ]]; then
+        echo ""
+        echo -e "  ${DIM}Create an API Token at: https://dash.cloudflare.com/profile/api-tokens${NC}"
+        echo -e "  ${DIM}Required permission: Zone → DNS → Edit  +  Zone → Zone Settings → Edit${NC}"
+        echo ""
+        ask "Cloudflare API Token:"
+        read -rs CF_TOKEN
+        echo ""
+
+        ask "Cloudflare Zone ID (find it on your domain's Overview page → right sidebar):"
+        read -r CF_ZONE_ID
+
+        echo ""
+        echo -e "  ${DIM}A Cloudflare Tunnel routes traffic through Cloudflare without exposing your server IP.${NC}"
+        ask "Set up a Cloudflare Tunnel (cloudflared)? [y/N]:"
+        read -r USE_CF_TUNNEL
+        USE_CF_TUNNEL="${USE_CF_TUNNEL,,}"
+    else
+        CF_TOKEN=""
+        CF_ZONE_ID=""
+        USE_CF_TUNNEL="n"
+    fi
+
+    echo ""
     info "Panel will be installed at: ${BOLD}https://$PANEL_DOMAIN${NC}"
     ask "Continue? [y/N]:"
     read -r CONFIRM
@@ -602,6 +634,157 @@ configure_firewall() {
     success "Firewall rules applied"
 }
 
+# ── Cloudflare DNS + Zone configuration ───────────────────────
+setup_cloudflare() {
+    [[ "${USE_CF:-n}" != "y" ]] && return 0
+
+    step "Configuring Cloudflare"
+
+    CF_API="https://api.cloudflare.com/client/v4"
+
+    # ── Validate token ────────────────────────────────────────
+    info "Verifying Cloudflare API token..."
+    TOKEN_CHECK=$(curl -sf -H "Authorization: Bearer $CF_TOKEN" \
+        "${CF_API}/user/tokens/verify" | grep -o '"status":"[^"]*"' | cut -d'"' -f4)
+
+    if [[ "$TOKEN_CHECK" != "active" ]]; then
+        warn "Cloudflare token invalid or inactive — skipping CF setup."
+        return 0
+    fi
+    success "API token: active"
+
+    # ── Detect server public IP ───────────────────────────────
+    SERVER_IP=$(curl -s4 https://ifconfig.me || curl -s4 https://api.ipify.org || curl -s4 https://ipv4.icanhazip.com)
+    [[ -z "$SERVER_IP" ]] && { warn "Could not detect server IP — skipping DNS creation."; SERVER_IP=""; }
+
+    # ── Helper: create or update a DNS A record ───────────────
+    cf_upsert_dns() {
+        local NAME="$1" PROXIED="$2"
+        [[ -z "$SERVER_IP" ]] && return
+
+        # Check for existing record
+        EXISTING_ID=$(curl -sf \
+            -H "Authorization: Bearer $CF_TOKEN" \
+            "${CF_API}/zones/${CF_ZONE_ID}/dns_records?type=A&name=${NAME}" \
+            | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+
+        PAYLOAD="{\"type\":\"A\",\"name\":\"${NAME}\",\"content\":\"${SERVER_IP}\",\"ttl\":1,\"proxied\":${PROXIED}}"
+
+        if [[ -n "$EXISTING_ID" ]]; then
+            curl -sf -X PUT \
+                -H "Authorization: Bearer $CF_TOKEN" \
+                -H "Content-Type: application/json" \
+                "${CF_API}/zones/${CF_ZONE_ID}/dns_records/${EXISTING_ID}" \
+                --data "$PAYLOAD" > /dev/null
+            success "DNS A record updated: ${NAME} → ${SERVER_IP} (proxied=${PROXIED})"
+        else
+            curl -sf -X POST \
+                -H "Authorization: Bearer $CF_TOKEN" \
+                -H "Content-Type: application/json" \
+                "${CF_API}/zones/${CF_ZONE_ID}/dns_records" \
+                --data "$PAYLOAD" > /dev/null
+            success "DNS A record created: ${NAME} → ${SERVER_IP} (proxied=${PROXIED})"
+        fi
+    }
+
+    # ── Helper: patch a zone setting ─────────────────────────
+    cf_zone_set() {
+        local SETTING="$1" VALUE="$2"
+        curl -sf -X PATCH \
+            -H "Authorization: Bearer $CF_TOKEN" \
+            -H "Content-Type: application/json" \
+            "${CF_API}/zones/${CF_ZONE_ID}/settings/${SETTING}" \
+            --data "{\"value\":\"${VALUE}\"}" > /dev/null \
+        && success "CF setting ${SETTING}: ${VALUE}" \
+        || warn "Could not set ${SETTING} (check token Zone Settings permission)"
+    }
+
+    # ── DNS records ───────────────────────────────────────────
+    # Panel: proxied (orange cloud — traffic routes via CF)
+    # Wings: NOT proxied (grey cloud — game traffic must be direct)
+    info "Creating DNS records..."
+    cf_upsert_dns "$PANEL_DOMAIN" "true"
+
+    if [[ "${INSTALL_WINGS:-false}" == true ]]; then
+        WINGS_DOMAIN="${WINGS_NODE_DOMAIN:-$PANEL_DOMAIN}"
+        if [[ "$WINGS_DOMAIN" != "$PANEL_DOMAIN" ]]; then
+            # Separate Wings subdomain — grey cloud (game ports can't go through CF proxy)
+            cf_upsert_dns "$WINGS_DOMAIN" "false"
+        fi
+    fi
+
+    # ── SSL/TLS mode: Full (we generate our own cert with certbot) ──
+    info "Applying Cloudflare zone settings..."
+    cf_zone_set "ssl" "full"
+
+    # ── Security & performance ────────────────────────────────
+    cf_zone_set "always_use_https" "on"
+    cf_zone_set "min_tls_version" "1.2"
+    cf_zone_set "tls_1_3" "zrt"              # TLS 1.3 + 0-RTT
+    cf_zone_set "automatic_https_rewrites" "on"
+    cf_zone_set "security_level" "medium"
+    cf_zone_set "brotli" "on"
+    cf_zone_set "http2" "on"
+    cf_zone_set "http3" "on"
+    cf_zone_set "0rtt" "on"
+    cf_zone_set "minify" "{\"js\":\"on\",\"css\":\"on\",\"html\":\"off\"}" 2>/dev/null || true
+    cf_zone_set "browser_cache_ttl" "14400"
+
+    # ── Cloudflare Tunnel (cloudflared) ──────────────────────
+    if [[ "${USE_CF_TUNNEL:-n}" == "y" ]]; then
+        step "Setting Up Cloudflare Tunnel"
+        divider
+
+        # Install cloudflared
+        info "Installing cloudflared..."
+        if ! command -v cloudflared &>/dev/null; then
+            curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg \
+                | tee /usr/share/keyrings/cloudflare-main.gpg > /dev/null
+            echo "deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] \
+https://pkg.cloudflare.com/cloudflared jammy main" \
+                | tee /etc/apt/sources.list.d/cloudflared.list > /dev/null
+            apt-get update -qq
+            apt-get install -y -q cloudflared
+        fi
+        success "cloudflared $(cloudflared --version 2>&1 | head -1 | awk '{print $3}')"
+
+        # Create the tunnel via API
+        info "Creating Cloudflare Tunnel 'xcasper-panel'..."
+        TUNNEL_RESPONSE=$(curl -sf -X POST \
+            -H "Authorization: Bearer $CF_TOKEN" \
+            -H "Content-Type: application/json" \
+            "${CF_API}/accounts/$(curl -sf -H "Authorization: Bearer $CF_TOKEN" \
+                ${CF_API}/accounts | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)/cfd_tunnel" \
+            --data '{"name":"xcasper-panel","config_src":"cloudflare"}')
+
+        TUNNEL_ID=$(echo "$TUNNEL_RESPONSE" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+        TUNNEL_TOKEN=$(echo "$TUNNEL_RESPONSE" | grep -o '"token":"[^"]*"' | head -1 | cut -d'"' -f4)
+
+        if [[ -n "$TUNNEL_ID" && -n "$TUNNEL_TOKEN" ]]; then
+            success "Tunnel created: $TUNNEL_ID"
+
+            # Install as a system service with the token
+            cloudflared service install "$TUNNEL_TOKEN" > /dev/null 2>&1 || true
+            systemctl enable cloudflared 2>/dev/null || true
+            systemctl start cloudflared 2>/dev/null || true
+            success "cloudflared service started"
+
+            # Update the DNS record to point at the tunnel
+            cf_upsert_dns "$PANEL_DOMAIN" "true"
+
+            info "Panel traffic now routing through Cloudflare Tunnel"
+            info "Tunnel ID: ${BOLD}$TUNNEL_ID${NC}"
+        else
+            warn "Could not create tunnel via API. Run manually:"
+            warn "  cloudflared tunnel login"
+            warn "  cloudflared tunnel create xcasper-panel"
+            warn "  cloudflared tunnel route dns xcasper-panel $PANEL_DOMAIN"
+        fi
+    fi
+
+    success "Cloudflare setup complete"
+}
+
 # ── Wings system user ─────────────────────────────────────────
 create_wings_user() {
     if ! id "pterodactyl" &>/dev/null; then
@@ -768,12 +951,25 @@ show_summary() {
         echo ""
     fi
 
+    if [[ "${USE_CF:-n}" == "y" ]]; then
+        echo -e "${CYAN}  Cloudflare:${NC}      ${GREEN}${BOLD}Configured ✓${NC}"
+        echo -e "${CYAN}  CF Zone ID:${NC}      $CF_ZONE_ID"
+        if [[ "${USE_CF_TUNNEL:-n}" == "y" ]]; then
+            echo -e "${CYAN}  CF Tunnel:${NC}       ${GREEN}${BOLD}Active ✓${NC}"
+        fi
+        echo ""
+    fi
+
     divider
     echo -e "${YELLOW}${BOLD}  Important — Save Before Closing:${NC}"
     echo -e "  • These credentials will not be shown again"
     if [[ "${INSTALL_PANEL:-false}" == true ]]; then
         echo -e "  • Configure SMTP:  ${CYAN}https://$PANEL_DOMAIN/admin/settings/mail${NC}"
         echo -e "  • Super Admin tab: Billing, plans, push notifications"
+    fi
+    if [[ "${USE_CF:-n}" == "y" ]]; then
+        echo -e "  • Wings nodes: keep DNS ${BOLD}grey cloud (not proxied)${NC} in Cloudflare"
+        echo -e "    Game ports (25565 etc.) cannot route through the CF proxy"
     fi
     if [[ "${INSTALL_WINGS:-false}" == true && "$WINGS_TOKEN" == "REPLACE_WITH_YOUR_TOKEN" ]]; then
         echo -e "  • Set Wings token: ${CYAN}nano /etc/pterodactyl/config.yml${NC}"
@@ -798,7 +994,12 @@ choose_component
 
 if [[ "${INSTALL_PANEL:-false}" == true ]]; then
     collect_panel_inputs
-    check_dns "$PANEL_DOMAIN"
+    # Skip strict DNS check when Cloudflare will auto-create the record
+    if [[ "${USE_CF:-n}" == "y" ]]; then
+        info "Cloudflare mode — DNS record will be auto-created. Skipping pre-flight DNS check."
+    else
+        check_dns "$PANEL_DOMAIN"
+    fi
 fi
 
 if [[ "${INSTALL_WINGS:-false}" == true ]]; then
@@ -815,6 +1016,7 @@ if [[ "${INSTALL_PANEL:-false}" == true ]]; then
     create_admin_user
     configure_nginx
     obtain_ssl
+    setup_cloudflare
     setup_queue_worker
     setup_cron
 fi

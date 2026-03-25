@@ -2348,6 +2348,222 @@ MYSQL_EOF
 # ════════════════════════════════════════════════════════════
 #   MAIN MENU + ENTRY POINT
 # ════════════════════════════════════════════════════════════
+# ── 8) Egg Downloader ─────────────────────────────────────────
+# XCASPER Eggs repo: github.com/Casper-Tech-ke/xcasper-eggs
+EGG_REPO="Casper-Tech-ke/xcasper-eggs"
+EGG_RAW="https://raw.githubusercontent.com/${EGG_REPO}/main"
+EGG_API="https://api.github.com/repos/${EGG_REPO}/contents"
+EGG_DEST="/tmp/xcasper-eggs"
+
+# Fetch egg list for a category from GitHub API
+_egg_list_category() {
+    local CAT="$1"
+    curl -sf "${EGG_API}/${CAT}" \
+        | grep '"name".*\.json' | cut -d'"' -f4
+}
+
+# Download a single egg
+_egg_download() {
+    local CAT="$1" FILE="$2"
+    mkdir -p "${EGG_DEST}/${CAT}"
+    local DEST="${EGG_DEST}/${CAT}/${FILE}"
+    if curl -sf "${EGG_RAW}/${CAT}/${FILE}" -o "$DEST"; then
+        echo "$DEST"
+    fi
+}
+
+# Show import instructions
+_egg_import_hint() {
+    echo ""
+    divider
+    echo -e "  ${CYAN}${BOLD}How to import this egg into your panel:${NC}"
+    echo -e "  1. Log in to your panel as admin"
+    echo -e "  2. Go to:  ${BOLD}Admin → Nests → Import Egg${NC}"
+    echo -e "  3. Upload the ${BOLD}.json${NC} file downloaded above"
+    echo -e "  4. Assign the egg to a Nest and save"
+    echo -e "  ${DIM}Eggs are saved to: ${EGG_DEST}/<category>/egg-name.json${NC}"
+    divider
+}
+
+# Category submenu — list eggs and let user pick
+_egg_category_menu() {
+    local CAT="$1"
+    local CAT_LABEL="$2"
+    while true; do
+        clear
+        banner
+        echo -e "  ${CYAN}${BOLD}🥚 Egg Downloader › ${CAT_LABEL}${NC}"
+        divider
+        echo ""
+        info "Fetching egg list from XCASPER repo..."
+
+        # Build indexed list from GitHub
+        mapfile -t EGGS < <(_egg_list_category "$CAT")
+
+        if [[ ${#EGGS[@]} -eq 0 ]]; then
+            warn "No eggs found in category '${CAT}' — check internet connection."
+            echo ""
+            read -rp "$(echo -e "${YELLOW}Press Enter to go back...${NC}")"
+            return
+        fi
+
+        echo ""
+        local IDX=1
+        for EGG in "${EGGS[@]}"; do
+            # Check if already downloaded
+            if [[ -f "${EGG_DEST}/${CAT}/${EGG}" ]]; then
+                echo -e "  ${CYAN}${IDX})${NC} ${EGG}  ${GREEN}${DIM}[downloaded]${NC}"
+            else
+                echo -e "  ${CYAN}${IDX})${NC} ${EGG}"
+            fi
+            ((IDX++))
+        done
+        echo ""
+        echo -e "  ${CYAN}a)${NC} Download ALL eggs in this category"
+        echo -e "  ${CYAN}0)${NC} Back"
+        echo ""
+        divider
+        ask "Choose egg [1-${#EGGS[@]}], 'a' for all, or 0 to go back:"
+        read -r EGG_PICK
+
+        case "$EGG_PICK" in
+            0) return 0 ;;
+            a|A)
+                clear
+                banner
+                step "Downloading all ${CAT_LABEL} eggs"
+                divider
+                local DL_COUNT=0
+                for EGG in "${EGGS[@]}"; do
+                    info "Downloading ${EGG}..."
+                    local SAVED
+                    SAVED=$(_egg_download "$CAT" "$EGG")
+                    if [[ -n "$SAVED" ]]; then
+                        success "${EGG}  →  ${SAVED}"
+                        ((DL_COUNT++))
+                    else
+                        warn "Failed to download ${EGG}"
+                    fi
+                done
+                echo ""
+                success "Downloaded ${DL_COUNT}/${#EGGS[@]} eggs"
+                _egg_import_hint
+                read -rp "$(echo -e "${YELLOW}Press Enter to continue...${NC}")"
+                ;;
+            *)
+                if [[ "$EGG_PICK" =~ ^[0-9]+$ ]] && \
+                    (( EGG_PICK >= 1 && EGG_PICK <= ${#EGGS[@]} )); then
+                    local SELECTED="${EGGS[$((EGG_PICK - 1))]}"
+                    clear
+                    banner
+                    step "Downloading Egg"
+                    divider
+                    info "Downloading ${SELECTED}..."
+                    local SAVED
+                    SAVED=$(_egg_download "$CAT" "$SELECTED")
+                    if [[ -n "$SAVED" ]]; then
+                        echo ""
+                        success "Saved to: ${BOLD}${SAVED}${NC}"
+                        _egg_import_hint
+                    else
+                        warn "Download failed — check internet connection."
+                    fi
+                    echo ""
+                    read -rp "$(echo -e "${YELLOW}Press Enter to continue...${NC}")"
+                else
+                    warn "Invalid choice."; sleep 1
+                fi
+                ;;
+        esac
+    done
+}
+
+menu_eggs() {
+    while true; do
+        clear
+        banner
+
+        # ── Live summary ──────────────────────────────────────
+        DL_COUNT=$(find "$EGG_DEST" -name "*.json" 2>/dev/null | wc -l)
+        echo -e "  ${CYAN}${BOLD}🥚  XCASPER Egg Downloader${NC}"
+        echo -e "  ${DIM}Source: github.com/${EGG_REPO}${NC}"
+        echo -e "  ${DIM}Eggs downloaded this session: ${DL_COUNT}${NC}"
+        echo ""
+        echo -e "  ${CYAN}1)${NC} Generic  ${DIM}(Python, Node.js, Golang, Java, Rust)${NC}"
+        echo -e "  ${CYAN}2)${NC} Bots     ${DIM}(Discord music bots, moderation)${NC}"
+        echo -e "  ${CYAN}3)${NC} Games    ${DIM}(Minecraft Paper)${NC}"
+        echo -e "  ${CYAN}4)${NC} Software ${DIM}(Uptime Kuma, Code Server)${NC}"
+        echo -e "  ${CYAN}5)${NC} Sync / Update all eggs from upstream"
+        echo -e "  ${CYAN}6)${NC} View downloaded eggs"
+        echo -e "  ${CYAN}0)${NC} Back to main menu"
+        echo ""
+        divider
+        ask "Choose [0-6]:"
+        read -r EGG_MENU
+
+        case "$EGG_MENU" in
+            1) _egg_category_menu "generic" "Generic Runtimes" ;;
+            2) _egg_category_menu "bots"    "Bots" ;;
+            3) _egg_category_menu "games"   "Games" ;;
+            4) _egg_category_menu "software" "Software" ;;
+
+            5)
+                clear
+                banner
+                step "Syncing all eggs from XCASPER repo"
+                divider
+                echo ""
+                TOTAL=0; UPDATED=0; FAILED=0
+                for CAT in generic bots games software; do
+                    info "Syncing category: ${CAT}..."
+                    mapfile -t SYNC_EGGS < <(_egg_list_category "$CAT")
+                    for EGG in "${SYNC_EGGS[@]}"; do
+                        ((TOTAL++))
+                        SAVED=$(_egg_download "$CAT" "$EGG")
+                        if [[ -n "$SAVED" ]]; then
+                            echo -e "  ${GREEN}✓${NC} ${CAT}/${EGG}"
+                            ((UPDATED++))
+                        else
+                            echo -e "  ${RED}✗${NC} ${CAT}/${EGG}"
+                            ((FAILED++))
+                        fi
+                    done
+                done
+                echo ""
+                divider
+                success "Sync complete — ${UPDATED}/${TOTAL} eggs updated"
+                [[ $FAILED -gt 0 ]] && warn "${FAILED} egg(s) failed to download"
+                _egg_import_hint
+                read -rp "$(echo -e "${YELLOW}Press Enter to continue...${NC}")"
+                ;;
+
+            6)
+                clear
+                banner
+                step "Downloaded Eggs"
+                divider
+                echo ""
+                if [[ $(find "$EGG_DEST" -name "*.json" 2>/dev/null | wc -l) -eq 0 ]]; then
+                    warn "No eggs downloaded yet — use options 1–5 above."
+                else
+                    find "$EGG_DEST" -name "*.json" | sort | while read -r F; do
+                        REL="${F#${EGG_DEST}/}"
+                        echo -e "  ${GREEN}✓${NC}  ${REL}"
+                    done
+                    echo ""
+                    echo -e "  ${DIM}Location: ${EGG_DEST}/${NC}"
+                fi
+                echo ""
+                _egg_import_hint
+                read -rp "$(echo -e "${YELLOW}Press Enter to continue...${NC}")"
+                ;;
+
+            0) return 0 ;;
+            *) warn "Invalid choice."; sleep 1 ;;
+        esac
+    done
+}
+
 show_main_menu() {
     clear
     echo -e "${CYAN}${BOLD}"
@@ -2370,6 +2586,7 @@ show_main_menu() {
     echo -e "  ${CYAN}${BOLD}5)${NC}  System Information"
     echo -e "  ${CYAN}${BOLD}6)${NC}  Tailscale VPN"
     echo -e "  ${CYAN}${BOLD}7)${NC}  Database Setup (remote access)"
+    echo -e "  ${CYAN}${BOLD}8)${NC}  Egg Downloader"
     echo -e "  ${CYAN}${BOLD}0)${NC}  Exit"
     echo ""
     divider
@@ -2380,7 +2597,7 @@ check_root
 
 while true; do
     show_main_menu
-    ask "Select an option [0-7]:"
+    ask "Select an option [0-8]:"
     read -r MAIN_CHOICE
 
     case "$MAIN_CHOICE" in
@@ -2391,6 +2608,7 @@ while true; do
         5) menu_system_info    ;;
         6) menu_tailscale      ;;
         7) menu_database       ;;
+        8) menu_eggs           ;;
         0)
             echo ""
             echo -e "${GREEN}${BOLD}  Goodbye from XCASPER Hosting!${NC}"
@@ -2398,7 +2616,7 @@ while true; do
             exit 0
             ;;
         *)
-            warn "Invalid option — choose 0–7."
+            warn "Invalid option — choose 0–8."
             sleep 1
             ;;
     esac

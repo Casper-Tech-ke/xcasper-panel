@@ -49,7 +49,7 @@ banner() {
 # ── Root check ──────────────────────────────────────────────
 check_root() {
     if [[ $EUID -ne 0 ]]; then
-        error "This installer must be run as root. Try: sudo bash <(curl -s https://get.xcasper.space)"
+        error "This installer must be run as root.\n  Try: sudo bash <(curl -s https://get.xcasper.space)"
     fi
 }
 
@@ -71,12 +71,81 @@ check_os() {
 
     case "$OS_VERSION" in
         20.04|22.04|24.04)
-            success "Detected Ubuntu $OS_VERSION — supported"
+            success "Ubuntu $OS_VERSION — supported"
             ;;
         *)
             warn "Ubuntu $OS_VERSION is not officially tested. Continuing anyway..."
             ;;
     esac
+}
+
+# ── Swap check ───────────────────────────────────────────────
+check_swap() {
+    step "Checking Memory & Swap"
+
+    TOTAL_RAM_MB=$(awk '/MemTotal/ {printf "%d", $2/1024}' /proc/meminfo)
+    SWAP_MB=$(awk '/SwapTotal/ {printf "%d", $2/1024}' /proc/meminfo)
+
+    info "RAM: ${TOTAL_RAM_MB}MB  |  Swap: ${SWAP_MB}MB"
+
+    if [[ "$TOTAL_RAM_MB" -lt 1500 && "$SWAP_MB" -lt 1024 ]]; then
+        warn "Low RAM detected (${TOTAL_RAM_MB}MB). Creating 2GB swap to prevent out-of-memory errors..."
+        if [[ ! -f /swapfile ]]; then
+            fallocate -l 2G /swapfile
+            chmod 600 /swapfile
+            mkswap /swapfile
+            swapon /swapfile
+            echo '/swapfile none swap sw 0 0' >> /etc/fstab
+            success "2GB swap created and activated"
+        else
+            info "Swap file already exists — skipping"
+        fi
+    else
+        success "Memory is sufficient — no swap needed"
+    fi
+}
+
+# ── Port availability check ──────────────────────────────────
+check_ports() {
+    step "Checking Port Availability"
+
+    PORTS_TO_CHECK=(80 443)
+    for PORT in "${PORTS_TO_CHECK[@]}"; do
+        if ss -tlnp "sport = :$PORT" 2>/dev/null | grep -q LISTEN; then
+            warn "Port $PORT is already in use. Nginx may fail to start."
+            warn "Run: ss -tlnp | grep :$PORT  to see what is using it."
+        else
+            success "Port $PORT is free"
+        fi
+    done
+}
+
+# ── DNS pre-flight check ─────────────────────────────────────
+check_dns() {
+    local domain="$1"
+    step "Checking DNS for $domain"
+
+    SERVER_IP=$(curl -s4 https://ifconfig.me 2>/dev/null || curl -s4 https://api.ipify.org 2>/dev/null || echo "unknown")
+    DOMAIN_IP=$(getent hosts "$domain" 2>/dev/null | awk '{print $1}' | head -1 || echo "")
+
+    info "This server's public IP: ${BOLD}$SERVER_IP${NC}"
+    info "DNS resolves $domain to:  ${BOLD}${DOMAIN_IP:-not found}${NC}"
+
+    if [[ "$DOMAIN_IP" == "$SERVER_IP" ]]; then
+        success "DNS is pointing correctly to this server"
+    elif [[ -z "$DOMAIN_IP" ]]; then
+        warn "Domain does not resolve yet. DNS may still be propagating."
+        warn "SSL certificate will FAIL if DNS is not pointing here."
+        ask "Continue anyway? [y/N]:"
+        read -r DNS_CONFIRM
+        [[ "${DNS_CONFIRM,,}" != "y" ]] && error "Cancelled. Fix your DNS A record first, then re-run the installer."
+    else
+        warn "Domain resolves to $DOMAIN_IP but this server is $SERVER_IP."
+        warn "SSL will FAIL unless DNS is updated and propagated."
+        ask "Continue anyway? [y/N]:"
+        read -r DNS_CONFIRM
+        [[ "${DNS_CONFIRM,,}" != "y" ]] && error "Cancelled. Update your DNS A record to $SERVER_IP, then re-run."
+    fi
 }
 
 # ── Menu ────────────────────────────────────────────────────
@@ -120,7 +189,7 @@ collect_panel_inputs() {
         info "Save this — you will need it if you reinstall."
     fi
 
-    ask "App timezone (default: Africa/Nairobi):"
+    ask "App timezone (default: Africa/Nairobi — see list: https://www.php.net/timezones):"
     read -r APP_TIMEZONE
     APP_TIMEZONE="${APP_TIMEZONE:-Africa/Nairobi}"
 
@@ -163,13 +232,12 @@ collect_wings_inputs() {
     ask "Panel URL — full URL including https:// (e.g. https://panel.yourdomain.com):"
     read -r PANEL_URL
     [[ -z "$PANEL_URL" ]] && error "Panel URL cannot be empty."
-    # Strip trailing slash
     PANEL_URL="${PANEL_URL%/}"
 
     ask "Wings token (from Panel → Admin → Nodes → Configuration — leave blank to set later):"
     read -r WINGS_TOKEN
     if [[ -z "$WINGS_TOKEN" ]]; then
-        warn "Token left blank — remember to add it to /etc/pterodactyl/config.yml before starting Wings."
+        warn "Token left blank — add it to /etc/pterodactyl/config.yml before starting Wings."
         WINGS_TOKEN="REPLACE_WITH_YOUR_TOKEN"
     fi
 }
@@ -190,7 +258,8 @@ install_dependencies() {
         apt-transport-https ca-certificates \
         gnupg lsb-release ufw \
         nginx certbot python3-certbot-nginx \
-        redis-server
+        redis-server \
+        dnsutils
 
     # PHP 8.3 — add repo only if not already present
     info "Adding PHP 8.3 repository..."
@@ -200,12 +269,13 @@ install_dependencies() {
         apt-get update -y -qq
     fi
 
-    info "Installing PHP 8.3 and extensions..."
+    info "Installing PHP 8.3 and all required extensions..."
     apt-get install -y -qq \
         php8.3 php8.3-fpm php8.3-cli php8.3-mysql \
         php8.3-mbstring php8.3-xml php8.3-curl \
         php8.3-zip php8.3-gd php8.3-bcmath \
-        php8.3-intl php8.3-tokenizer php8.3-fileinfo
+        php8.3-intl php8.3-tokenizer php8.3-fileinfo \
+        php8.3-redis php8.3-posix
 
     # MySQL
     info "Installing MySQL..."
@@ -237,7 +307,12 @@ install_dependencies() {
     npm install -g yarn --quiet
     success "Yarn $(yarn --version)"
 
-    success "All dependencies installed"
+    # Enable and start Redis + PHP-FPM
+    info "Starting services..."
+    systemctl enable redis-server && systemctl start redis-server
+    systemctl enable php8.3-fpm  && systemctl start php8.3-fpm
+
+    success "All dependencies installed and services running"
 }
 
 # ── Setup MySQL ──────────────────────────────────────────────
@@ -245,8 +320,15 @@ setup_database() {
     step "Setting Up Database"
 
     info "Starting MySQL..."
-    systemctl start mysql
     systemctl enable mysql
+    systemctl start mysql
+
+    # Wait for MySQL socket to be ready
+    for i in {1..15}; do
+        mysqladmin ping --socket=/var/run/mysqld/mysqld.sock --silent 2>/dev/null && break
+        info "Waiting for MySQL to be ready... ($i/15)"
+        sleep 2
+    done
 
     info "Creating database and user..."
     mysql -u root --socket=/var/run/mysqld/mysqld.sock << SQL
@@ -257,7 +339,7 @@ GRANT ALL PRIVILEGES ON xcasper_panel.* TO 'xcasper'@'localhost';
 FLUSH PRIVILEGES;
 SQL
 
-    success "Database 'xcasper_panel' created with user 'xcasper'"
+    success "Database 'xcasper_panel' ready with user 'xcasper'"
 }
 
 # ── Clone & Install Panel ─────────────────────────────────────
@@ -296,12 +378,12 @@ configure_env() {
 
     cd /var/www/xcasper-panel
 
-    cp -n .env.example .env 2>/dev/null || cp .env.example .env
+    cp .env.example .env
 
     # Generate app key
     php artisan key:generate --force --no-interaction
 
-    # Update .env values — append if key missing, replace if present
+    # Smart env setter — replaces existing key or appends new one
     set_env() {
         local key="$1" val="$2"
         if grep -q "^${key}=" .env 2>/dev/null; then
@@ -314,18 +396,26 @@ configure_env() {
     set_env "APP_URL"          "https://${PANEL_DOMAIN}"
     set_env "APP_TIMEZONE"     "${APP_TIMEZONE}"
     set_env "DB_HOST"          "127.0.0.1"
+    set_env "DB_PORT"          "3306"
     set_env "DB_DATABASE"      "xcasper_panel"
     set_env "DB_USERNAME"      "xcasper"
     set_env "DB_PASSWORD"      "${DB_PASSWORD}"
     set_env "CACHE_DRIVER"     "redis"
     set_env "SESSION_DRIVER"   "redis"
     set_env "QUEUE_CONNECTION" "redis"
+    set_env "REDIS_HOST"       "127.0.0.1"
+    set_env "REDIS_PORT"       "6379"
 
     info "Running database migrations..."
     php artisan migrate --force --no-interaction
 
     info "Seeding database..."
     php artisan db:seed --force --no-interaction
+
+    info "Caching configuration..."
+    php artisan config:cache
+    php artisan route:cache
+    php artisan view:cache
 
     success "Environment configured"
 }
@@ -363,6 +453,9 @@ create_admin_user() {
 configure_nginx() {
     step "Configuring Nginx"
 
+    # Stop any conflicting service on port 80
+    systemctl stop apache2 2>/dev/null || true
+
     cat > /etc/nginx/sites-available/xcasper-panel << NGINX
 server {
     listen 80;
@@ -377,6 +470,7 @@ server {
 
     client_max_body_size 100m;
     client_body_timeout  120s;
+    send_timeout         300s;
 
     location / {
         try_files \$uri \$uri/ /index.php?\$query_string;
@@ -388,6 +482,8 @@ server {
         include fastcgi_params;
         fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
         fastcgi_read_timeout 300;
+        fastcgi_buffers 16 16k;
+        fastcgi_buffer_size 32k;
     }
 
     location ~ /\.ht {
@@ -399,7 +495,7 @@ NGINX
     ln -sf /etc/nginx/sites-available/xcasper-panel /etc/nginx/sites-enabled/xcasper-panel
     rm -f /etc/nginx/sites-enabled/default
 
-    nginx -t && systemctl reload nginx
+    nginx -t && systemctl enable nginx && systemctl reload nginx
     success "Nginx configured for $PANEL_DOMAIN"
 }
 
@@ -415,7 +511,11 @@ obtain_ssl() {
         --domains "$PANEL_DOMAIN" \
         --redirect
 
-    success "SSL certificate installed for $PANEL_DOMAIN"
+    # Ensure certbot auto-renewal timer is running
+    systemctl enable certbot.timer 2>/dev/null || true
+    systemctl start  certbot.timer 2>/dev/null || true
+
+    success "SSL certificate installed — auto-renewal enabled"
 }
 
 # ── Setup Queue Worker ────────────────────────────────────────
@@ -434,6 +534,9 @@ WorkingDirectory=/var/www/xcasper-panel
 ExecStart=/usr/bin/php /var/www/xcasper-panel/artisan queue:work --sleep=3 --tries=3 --max-time=3600
 Restart=always
 RestartSec=5
+StandardOutput=syslog
+StandardError=syslog
+SyslogIdentifier=xcasper-queue
 
 [Install]
 WantedBy=multi-user.target
@@ -451,8 +554,6 @@ setup_cron() {
     step "Setting Up Scheduled Tasks (Cron)"
 
     CRON_LINE="* * * * * php /var/www/xcasper-panel/artisan schedule:run >> /dev/null 2>&1"
-
-    # Read existing crontab for www-data (may be empty on fresh install)
     EXISTING_CRON=$(crontab -l -u www-data 2>/dev/null || true)
 
     if echo "$EXISTING_CRON" | grep -qF "artisan schedule:run"; then
@@ -467,9 +568,9 @@ setup_cron() {
 configure_firewall() {
     step "Configuring Firewall (UFW)"
 
-    ufw allow 22/tcp   comment "SSH"    2>/dev/null || true
-    ufw allow 80/tcp   comment "HTTP"   2>/dev/null || true
-    ufw allow 443/tcp  comment "HTTPS"  2>/dev/null || true
+    ufw allow 22/tcp   comment "SSH"         2>/dev/null || true
+    ufw allow 80/tcp   comment "HTTP"        2>/dev/null || true
+    ufw allow 443/tcp  comment "HTTPS"       2>/dev/null || true
     ufw allow 8080/tcp comment "Wings HTTP"  2>/dev/null || true
     ufw allow 2022/tcp comment "Wings SFTP"  2>/dev/null || true
     ufw --force enable
@@ -477,9 +578,23 @@ configure_firewall() {
     success "Firewall rules applied"
 }
 
+# ── Wings system user ─────────────────────────────────────────
+create_wings_user() {
+    if ! id "pterodactyl" &>/dev/null; then
+        info "Creating 'pterodactyl' system user..."
+        useradd -r -d /var/lib/pterodactyl -s /usr/sbin/nologin pterodactyl
+    fi
+    mkdir -p /var/lib/pterodactyl/{volumes,archives,backups}
+    mkdir -p /var/log/pterodactyl
+    chown -R pterodactyl:pterodactyl /var/lib/pterodactyl /var/log/pterodactyl
+    success "Wings system user ready"
+}
+
 # ── Install Wings ─────────────────────────────────────────────
 install_wings() {
     step "Installing Wings Daemon"
+
+    create_wings_user
 
     info "Installing Docker..."
     if ! command -v docker &>/dev/null; then
@@ -490,8 +605,11 @@ install_wings() {
     DOCKER_VER=$(docker --version | awk '{print $3}' | tr -d ',')
     success "Docker $DOCKER_VER"
 
-    info "Downloading Wings binary..."
-    mkdir -p /etc/pterodactyl /var/lib/pterodactyl/{volumes,archives,backups}
+    info "Adding pterodactyl user to docker group..."
+    usermod -aG docker pterodactyl 2>/dev/null || true
+
+    info "Downloading latest Wings binary..."
+    mkdir -p /etc/pterodactyl
 
     WINGS_VERSION=$(curl -s "https://api.github.com/repos/pterodactyl/wings/releases/latest" \
         | grep '"tag_name"' | cut -d '"' -f4)
@@ -499,10 +617,10 @@ install_wings() {
         "https://github.com/pterodactyl/wings/releases/download/${WINGS_VERSION}/wings_linux_amd64" \
         -o /usr/local/bin/wings
     chmod +x /usr/local/bin/wings
-    success "Wings $WINGS_VERSION installed"
+    success "Wings $WINGS_VERSION installed at /usr/local/bin/wings"
 
-    # Write Wings config
     WINGS_UUID=$(cat /proc/sys/kernel/random/uuid)
+
     cat > /etc/pterodactyl/config.yml << WCONF
 debug: false
 uuid: "${WINGS_UUID}"
@@ -559,7 +677,6 @@ WCONF
 
     success "Wings configuration written to /etc/pterodactyl/config.yml"
 
-    # Wings systemd service
     cat > /etc/systemd/system/wings.service << SERVICE
 [Unit]
 Description=XCASPER Wings Daemon
@@ -575,6 +692,9 @@ RestartSec=5
 StartLimitInterval=180
 StartLimitBurst=30
 LimitNOFILE=4096
+StandardOutput=syslog
+StandardError=syslog
+SyslogIdentifier=wings
 
 [Install]
 WantedBy=multi-user.target
@@ -587,7 +707,8 @@ SERVICE
         systemctl start wings
         success "Wings daemon started"
     else
-        warn "Wings NOT started — add your real token to /etc/pterodactyl/config.yml then: systemctl start wings"
+        warn "Wings NOT started — add your real token to /etc/pterodactyl/config.yml"
+        warn "Then run: systemctl start wings"
     fi
 }
 
@@ -618,20 +739,21 @@ show_summary() {
 
     if [[ "${INSTALL_WINGS:-false}" == true ]]; then
         echo -e "${CYAN}  Wings Config:${NC}    /etc/pterodactyl/config.yml"
+        echo -e "${CYAN}  Wings Binary:${NC}    /usr/local/bin/wings"
         echo -e "${CYAN}  Wings Status:${NC}    $(systemctl is-active wings 2>/dev/null || echo 'not started')"
         echo ""
     fi
 
     divider
-    echo -e "${YELLOW}${BOLD}  Important — Read Before You Close This Window:${NC}"
-    echo -e "  • Save the credentials above — they will not be shown again"
+    echo -e "${YELLOW}${BOLD}  Important — Save Before Closing:${NC}"
+    echo -e "  • These credentials will not be shown again"
     if [[ "${INSTALL_PANEL:-false}" == true ]]; then
-        echo -e "  • Configure SMTP: ${CYAN}https://$PANEL_DOMAIN/admin/settings/mail${NC}"
-        echo -e "  • Set up billing from the Super Admin tab in the panel"
+        echo -e "  • Configure SMTP:  ${CYAN}https://$PANEL_DOMAIN/admin/settings/mail${NC}"
+        echo -e "  • Super Admin tab: Billing, plans, push notifications"
     fi
     if [[ "${INSTALL_WINGS:-false}" == true && "$WINGS_TOKEN" == "REPLACE_WITH_YOUR_TOKEN" ]]; then
-        echo -e "  • Add Wings token: ${CYAN}nano /etc/pterodactyl/config.yml${NC}"
-        echo -e "    then run:        ${CYAN}systemctl start wings${NC}"
+        echo -e "  • Set Wings token: ${CYAN}nano /etc/pterodactyl/config.yml${NC}"
+        echo -e "    Then start Wings: ${CYAN}systemctl start wings${NC}"
     fi
     divider
     echo ""
@@ -646,10 +768,13 @@ show_summary() {
 banner
 check_root
 check_os
+check_swap
+check_ports
 choose_component
 
 if [[ "${INSTALL_PANEL:-false}" == true ]]; then
     collect_panel_inputs
+    check_dns "$PANEL_DOMAIN"
 fi
 
 if [[ "${INSTALL_WINGS:-false}" == true ]]; then

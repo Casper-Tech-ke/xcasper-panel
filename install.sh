@@ -5,7 +5,7 @@
 #   Repo:   https://github.com/Casper-Tech-ke/xcasper-panel
 #   Docs:   https://docs.xcasper.space
 # ============================================================
-set -euo pipefail
+set -eo pipefail
 
 # ── Colours ────────────────────────────────────────────────
 RED='\033[0;31m'
@@ -56,13 +56,14 @@ check_root() {
 # ── OS check ────────────────────────────────────────────────
 check_os() {
     step "Checking Operating System"
-    if [[ -f /etc/os-release ]]; then
-        source /etc/os-release
-        OS_NAME="$ID"
-        OS_VERSION="$VERSION_ID"
-    else
+    if [[ ! -f /etc/os-release ]]; then
         error "Cannot determine OS. Ubuntu 20.04 / 22.04 / 24.04 required."
     fi
+
+    # shellcheck disable=SC1091
+    source /etc/os-release
+    OS_NAME="${ID:-}"
+    OS_VERSION="${VERSION_ID:-}"
 
     if [[ "$OS_NAME" != "ubuntu" ]]; then
         error "Only Ubuntu is supported. Detected: $OS_NAME $OS_VERSION"
@@ -93,7 +94,7 @@ choose_component() {
         1) INSTALL_PANEL=true;  INSTALL_WINGS=false ;;
         2) INSTALL_PANEL=false; INSTALL_WINGS=true  ;;
         3) INSTALL_PANEL=true;  INSTALL_WINGS=true  ;;
-        *) error "Invalid choice. Run the installer again." ;;
+        *) error "Invalid choice. Run the installer again and enter 1, 2, or 3." ;;
     esac
 }
 
@@ -114,7 +115,7 @@ collect_panel_inputs() {
     read -rs DB_PASSWORD
     echo ""
     if [[ -z "$DB_PASSWORD" ]]; then
-        DB_PASSWORD=$(tr -dc 'A-Za-z0-9@#$%' < /dev/urandom | head -c 24)
+        DB_PASSWORD=$(tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 24)
         info "Generated database password: ${BOLD}$DB_PASSWORD${NC}"
         info "Save this — you will need it if you reinstall."
     fi
@@ -129,21 +130,21 @@ collect_panel_inputs() {
 
     ask "Admin first name:"
     read -r ADMIN_FIRST
-    [[ -z "$ADMIN_FIRST" ]] && ADMIN_FIRST="Admin"
+    ADMIN_FIRST="${ADMIN_FIRST:-Admin}"
 
     ask "Admin last name:"
     read -r ADMIN_LAST
-    [[ -z "$ADMIN_LAST" ]] && ADMIN_LAST="User"
+    ADMIN_LAST="${ADMIN_LAST:-User}"
 
     ask "Admin username (no spaces):"
     read -r ADMIN_USER
-    [[ -z "$ADMIN_USER" ]] && ADMIN_USER="admin"
+    ADMIN_USER="${ADMIN_USER:-admin}"
 
-    ask "Admin password:"
+    ask "Admin password (press Enter to auto-generate):"
     read -rs ADMIN_PASSWORD
     echo ""
     if [[ -z "$ADMIN_PASSWORD" ]]; then
-        ADMIN_PASSWORD=$(tr -dc 'A-Za-z0-9!@#' < /dev/urandom | head -c 16)
+        ADMIN_PASSWORD=$(tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 16)
         info "Generated admin password: ${BOLD}$ADMIN_PASSWORD${NC}"
     fi
 
@@ -159,18 +160,25 @@ collect_wings_inputs() {
     step "Wings Configuration"
     divider
 
-    ask "Panel URL (e.g. https://panel.yourdomain.com):"
+    ask "Panel URL — full URL including https:// (e.g. https://panel.yourdomain.com):"
     read -r PANEL_URL
     [[ -z "$PANEL_URL" ]] && error "Panel URL cannot be empty."
+    # Strip trailing slash
+    PANEL_URL="${PANEL_URL%/}"
 
-    ask "Wings token (from Panel → Admin → Nodes → Configuration):"
+    ask "Wings token (from Panel → Admin → Nodes → Configuration — leave blank to set later):"
     read -r WINGS_TOKEN
-    [[ -z "$WINGS_TOKEN" ]] && warn "Token left blank — you can add it later in /etc/pterodactyl/config.yml"
+    if [[ -z "$WINGS_TOKEN" ]]; then
+        warn "Token left blank — remember to add it to /etc/pterodactyl/config.yml before starting Wings."
+        WINGS_TOKEN="REPLACE_WITH_YOUR_TOKEN"
+    fi
 }
 
 # ── Install dependencies ─────────────────────────────────────
 install_dependencies() {
     step "Installing System Dependencies"
+
+    export DEBIAN_FRONTEND=noninteractive
 
     info "Updating package list..."
     apt-get update -y -qq
@@ -184,12 +192,13 @@ install_dependencies() {
         nginx certbot python3-certbot-nginx \
         redis-server
 
-    # PHP 8.3
+    # PHP 8.3 — add repo only if not already present
     info "Adding PHP 8.3 repository..."
-    if ! grep -q "ondrej/php" /etc/apt/sources.list.d/*.list 2>/dev/null; then
+    PHP_LIST="/etc/apt/sources.list.d/ondrej-ubuntu-php-$(lsb_release -cs).list"
+    if [[ ! -f "$PHP_LIST" ]]; then
         LC_ALL=C.UTF-8 add-apt-repository -y ppa:ondrej/php
+        apt-get update -y -qq
     fi
-    apt-get update -y -qq
 
     info "Installing PHP 8.3 and extensions..."
     apt-get install -y -qq \
@@ -200,26 +209,32 @@ install_dependencies() {
 
     # MySQL
     info "Installing MySQL..."
-    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq mysql-server
+    apt-get install -y -qq mysql-server
 
     # Composer
     info "Installing Composer..."
     if ! command -v composer &>/dev/null; then
-        curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
+        curl -sS https://getcomposer.org/installer \
+            | php -- --install-dir=/usr/local/bin --filename=composer --quiet
     fi
-    success "Composer $(composer --version --no-ansi 2>/dev/null | head -1)"
+    COMPOSER_VERSION=$(composer --version --no-ansi 2>/dev/null | awk '{print $3}')
+    success "Composer $COMPOSER_VERSION"
 
     # Node.js 20
     info "Installing Node.js 20..."
-    if ! command -v node &>/dev/null || [[ $(node -v | cut -d. -f1 | tr -d 'v') -lt 18 ]]; then
-        curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+    NODE_MAJOR=0
+    if command -v node &>/dev/null; then
+        NODE_MAJOR=$(node -v | cut -d. -f1 | tr -d 'v')
+    fi
+    if [[ "$NODE_MAJOR" -lt 18 ]]; then
+        curl -fsSL https://deb.nodesource.com/setup_20.x | bash - >/dev/null 2>&1
         apt-get install -y -qq nodejs
     fi
     success "Node $(node -v)"
 
     # Yarn
     info "Installing Yarn..."
-    npm install -g yarn -q
+    npm install -g yarn --quiet
     success "Yarn $(yarn --version)"
 
     success "All dependencies installed"
@@ -234,7 +249,7 @@ setup_database() {
     systemctl enable mysql
 
     info "Creating database and user..."
-    mysql -u root << SQL
+    mysql -u root --socket=/var/run/mysqld/mysqld.sock << SQL
 CREATE DATABASE IF NOT EXISTS xcasper_panel CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 DROP USER IF EXISTS 'xcasper'@'localhost';
 CREATE USER 'xcasper'@'localhost' IDENTIFIED BY '${DB_PASSWORD}';
@@ -263,7 +278,8 @@ install_panel_files() {
     cd "$PANEL_DIR"
 
     info "Installing PHP dependencies with Composer..."
-    composer install --no-dev --optimize-autoloader --no-interaction
+    COMPOSER_ALLOW_SUPERUSER=1 composer install \
+        --no-dev --optimize-autoloader --no-interaction --quiet
 
     info "Installing Node.js dependencies..."
     yarn install --silent
@@ -280,27 +296,36 @@ configure_env() {
 
     cd /var/www/xcasper-panel
 
-    cp .env.example .env
+    cp -n .env.example .env 2>/dev/null || cp .env.example .env
 
     # Generate app key
-    php artisan key:generate --force
+    php artisan key:generate --force --no-interaction
 
-    # Write env values
-    sed -i "s|APP_URL=.*|APP_URL=https://${PANEL_DOMAIN}|" .env
-    sed -i "s|APP_TIMEZONE=.*|APP_TIMEZONE=${APP_TIMEZONE}|" .env
-    sed -i "s|DB_HOST=.*|DB_HOST=127.0.0.1|" .env
-    sed -i "s|DB_DATABASE=.*|DB_DATABASE=xcasper_panel|" .env
-    sed -i "s|DB_USERNAME=.*|DB_USERNAME=xcasper|" .env
-    sed -i "s|DB_PASSWORD=.*|DB_PASSWORD=${DB_PASSWORD}|" .env
-    sed -i "s|CACHE_DRIVER=.*|CACHE_DRIVER=redis|" .env
-    sed -i "s|SESSION_DRIVER=.*|SESSION_DRIVER=redis|" .env
-    sed -i "s|QUEUE_CONNECTION=.*|QUEUE_CONNECTION=redis|" .env
+    # Update .env values — append if key missing, replace if present
+    set_env() {
+        local key="$1" val="$2"
+        if grep -q "^${key}=" .env 2>/dev/null; then
+            sed -i "s|^${key}=.*|${key}=${val}|" .env
+        else
+            echo "${key}=${val}" >> .env
+        fi
+    }
+
+    set_env "APP_URL"          "https://${PANEL_DOMAIN}"
+    set_env "APP_TIMEZONE"     "${APP_TIMEZONE}"
+    set_env "DB_HOST"          "127.0.0.1"
+    set_env "DB_DATABASE"      "xcasper_panel"
+    set_env "DB_USERNAME"      "xcasper"
+    set_env "DB_PASSWORD"      "${DB_PASSWORD}"
+    set_env "CACHE_DRIVER"     "redis"
+    set_env "SESSION_DRIVER"   "redis"
+    set_env "QUEUE_CONNECTION" "redis"
 
     info "Running database migrations..."
-    php artisan migrate --force
+    php artisan migrate --force --no-interaction
 
     info "Seeding database..."
-    php artisan db:seed --force
+    php artisan db:seed --force --no-interaction
 
     success "Environment configured"
 }
@@ -328,7 +353,8 @@ create_admin_user() {
         --name-first="$ADMIN_FIRST" \
         --name-last="$ADMIN_LAST" \
         --password="$ADMIN_PASSWORD" \
-        --admin=1
+        --admin=1 \
+        --no-interaction
 
     success "Admin account created: ${BOLD}$ADMIN_USER${NC}"
 }
@@ -356,7 +382,7 @@ server {
         try_files \$uri \$uri/ /index.php?\$query_string;
     }
 
-    location ~ \.php\$ {
+    location ~ \.php$ {
         fastcgi_pass unix:/run/php/php8.3-fpm.sock;
         fastcgi_index index.php;
         include fastcgi_params;
@@ -426,23 +452,27 @@ setup_cron() {
 
     CRON_LINE="* * * * * php /var/www/xcasper-panel/artisan schedule:run >> /dev/null 2>&1"
 
-    # Add only if not already present
-    (crontab -l -u www-data 2>/dev/null | grep -qF "artisan schedule:run") || \
-        (crontab -l -u www-data 2>/dev/null; echo "$CRON_LINE") | crontab -u www-data -
+    # Read existing crontab for www-data (may be empty on fresh install)
+    EXISTING_CRON=$(crontab -l -u www-data 2>/dev/null || true)
 
-    success "Cron job added for www-data"
+    if echo "$EXISTING_CRON" | grep -qF "artisan schedule:run"; then
+        info "Cron job already present — skipping"
+    else
+        printf '%s\n%s\n' "$EXISTING_CRON" "$CRON_LINE" | crontab -u www-data -
+        success "Cron job added for www-data"
+    fi
 }
 
 # ── Configure Firewall ────────────────────────────────────────
 configure_firewall() {
     step "Configuring Firewall (UFW)"
 
-    ufw allow 22/tcp   comment "SSH"
-    ufw allow 80/tcp   comment "HTTP"
-    ufw allow 443/tcp  comment "HTTPS"
-    ufw allow 8080/tcp comment "Wings HTTP"
-    ufw allow 2022/tcp comment "Wings SFTP"
-    echo "y" | ufw enable
+    ufw allow 22/tcp   comment "SSH"    2>/dev/null || true
+    ufw allow 80/tcp   comment "HTTP"   2>/dev/null || true
+    ufw allow 443/tcp  comment "HTTPS"  2>/dev/null || true
+    ufw allow 8080/tcp comment "Wings HTTP"  2>/dev/null || true
+    ufw allow 2022/tcp comment "Wings SFTP"  2>/dev/null || true
+    ufw --force enable
 
     success "Firewall rules applied"
 }
@@ -453,30 +483,32 @@ install_wings() {
 
     info "Installing Docker..."
     if ! command -v docker &>/dev/null; then
-        curl -fsSL https://get.docker.com | bash
+        curl -fsSL https://get.docker.com | bash >/dev/null 2>&1
         systemctl enable docker
         systemctl start docker
     fi
-    success "Docker $(docker --version)"
+    DOCKER_VER=$(docker --version | awk '{print $3}' | tr -d ',')
+    success "Docker $DOCKER_VER"
 
     info "Downloading Wings binary..."
-    mkdir -p /etc/pterodactyl
+    mkdir -p /etc/pterodactyl /var/lib/pterodactyl/{volumes,archives,backups}
 
-    WINGS_VERSION=$(curl -s "https://api.github.com/repos/pterodactyl/wings/releases/latest" | grep '"tag_name"' | cut -d '"' -f4)
-    curl -L "https://github.com/pterodactyl/wings/releases/download/${WINGS_VERSION}/wings_linux_amd64" \
+    WINGS_VERSION=$(curl -s "https://api.github.com/repos/pterodactyl/wings/releases/latest" \
+        | grep '"tag_name"' | cut -d '"' -f4)
+    curl -fsSL \
+        "https://github.com/pterodactyl/wings/releases/download/${WINGS_VERSION}/wings_linux_amd64" \
         -o /usr/local/bin/wings
-
-    chmod u+x /usr/local/bin/wings
+    chmod +x /usr/local/bin/wings
     success "Wings $WINGS_VERSION installed"
 
-    # Write config if token provided
-    if [[ -n "${WINGS_TOKEN:-}" ]]; then
-        info "Writing Wings configuration..."
-        cat > /etc/pterodactyl/config.yml << WCONF
+    # Write Wings config
+    WINGS_UUID=$(cat /proc/sys/kernel/random/uuid)
+    cat > /etc/pterodactyl/config.yml << WCONF
 debug: false
-uuid: "$(cat /proc/sys/kernel/random/uuid)"
+uuid: "${WINGS_UUID}"
 token_id: ""
 token: "${WINGS_TOKEN}"
+remote: "${PANEL_URL}"
 api:
   host: "0.0.0.0"
   port: 8080
@@ -524,9 +556,8 @@ cache:
 allowed_mounts: []
 allowed_origins: []
 WCONF
-    else
-        warn "Wings token not set. Edit /etc/pterodactyl/config.yml manually after getting the token from your panel."
-    fi
+
+    success "Wings configuration written to /etc/pterodactyl/config.yml"
 
     # Wings systemd service
     cat > /etc/systemd/system/wings.service << SERVICE
@@ -551,9 +582,13 @@ SERVICE
 
     systemctl daemon-reload
     systemctl enable wings
-    systemctl start wings
 
-    success "Wings daemon running"
+    if [[ "$WINGS_TOKEN" != "REPLACE_WITH_YOUR_TOKEN" ]]; then
+        systemctl start wings
+        success "Wings daemon started"
+    else
+        warn "Wings NOT started — add your real token to /etc/pterodactyl/config.yml then: systemctl start wings"
+    fi
 }
 
 # ── Summary ───────────────────────────────────────────────────
@@ -582,25 +617,25 @@ show_summary() {
     fi
 
     if [[ "${INSTALL_WINGS:-false}" == true ]]; then
-        echo -e "${CYAN}  Wings Status:${NC}    $(systemctl is-active wings)"
         echo -e "${CYAN}  Wings Config:${NC}    /etc/pterodactyl/config.yml"
+        echo -e "${CYAN}  Wings Status:${NC}    $(systemctl is-active wings 2>/dev/null || echo 'not started')"
         echo ""
     fi
 
     divider
-    echo -e "${YELLOW}  ${BOLD}Important:${NC}"
+    echo -e "${YELLOW}${BOLD}  Important — Read Before You Close This Window:${NC}"
     echo -e "  • Save the credentials above — they will not be shown again"
     if [[ "${INSTALL_PANEL:-false}" == true ]]; then
-        echo -e "  • Configure SMTP email at: ${CYAN}https://$PANEL_DOMAIN/admin/settings/mail${NC}"
-        echo -e "  • Set up billing at the Super Admin tab in the panel"
+        echo -e "  • Configure SMTP: ${CYAN}https://$PANEL_DOMAIN/admin/settings/mail${NC}"
+        echo -e "  • Set up billing from the Super Admin tab in the panel"
     fi
-    if [[ "${INSTALL_WINGS:-false}" == true && -z "${WINGS_TOKEN:-}" ]]; then
-        echo -e "  • Add your Wings token: ${CYAN}nano /etc/pterodactyl/config.yml${NC}"
-        echo -e "    then run: ${CYAN}systemctl restart wings${NC}"
+    if [[ "${INSTALL_WINGS:-false}" == true && "$WINGS_TOKEN" == "REPLACE_WITH_YOUR_TOKEN" ]]; then
+        echo -e "  • Add Wings token: ${CYAN}nano /etc/pterodactyl/config.yml${NC}"
+        echo -e "    then run:        ${CYAN}systemctl start wings${NC}"
     fi
     divider
     echo ""
-    echo -e "${DIM}  Docs: https://docs.xcasper.space"
+    echo -e "${DIM}  Docs:   https://docs.xcasper.space"
     echo -e "  GitHub: https://github.com/Casper-Tech-ke${NC}"
     echo ""
 }
@@ -621,7 +656,6 @@ if [[ "${INSTALL_WINGS:-false}" == true ]]; then
     collect_wings_inputs
 fi
 
-# Global dependencies needed for either component
 install_dependencies
 
 if [[ "${INSTALL_PANEL:-false}" == true ]]; then

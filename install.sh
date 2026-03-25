@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # ============================================================
-#   XCASPER Hosting — Automated Installer
+#   XCASPER Hosting Manager
 #   Usage:  bash <(curl -s https://get.xcasper.space)
 #   Repo:   https://github.com/Casper-Tech-ke/xcasper-panel
 #   Docs:   https://docs.xcasper.space
 # ============================================================
-set -eo pipefail
+set -o pipefail
 
 # ── Colours ────────────────────────────────────────────────
 RED='\033[0;31m'
@@ -148,24 +148,7 @@ check_dns() {
     fi
 }
 
-# ── Menu ────────────────────────────────────────────────────
-choose_component() {
-    step "What would you like to install?"
-    echo ""
-    echo -e "  ${CYAN}1)${NC} Panel only        (web interface)"
-    echo -e "  ${CYAN}2)${NC} Wings only         (game server daemon)"
-    echo -e "  ${CYAN}3)${NC} Panel + Wings      (full single-server setup)"
-    echo ""
-    ask "Enter your choice [1/2/3]:"
-    read -r INSTALL_CHOICE
-
-    case "$INSTALL_CHOICE" in
-        1) INSTALL_PANEL=true;  INSTALL_WINGS=false ;;
-        2) INSTALL_PANEL=false; INSTALL_WINGS=true  ;;
-        3) INSTALL_PANEL=true;  INSTALL_WINGS=true  ;;
-        *) error "Invalid choice. Run the installer again and enter 1, 2, or 3." ;;
-    esac
-}
+# (choose_component replaced by main menu — see bottom of script)
 
 # ── Collect Panel inputs ─────────────────────────────────────
 collect_panel_inputs() {
@@ -983,32 +966,27 @@ show_summary() {
 }
 
 # ════════════════════════════════════════════════════════════
-#   MAIN
+#   MENU ACTIONS
 # ════════════════════════════════════════════════════════════
-banner
-check_root
-check_os
-check_swap
-check_ports
-choose_component
 
-if [[ "${INSTALL_PANEL:-false}" == true ]]; then
+# ── 1) Install Panel ─────────────────────────────────────────
+menu_install_panel() {
+    check_os
+    check_swap
+    check_ports
+
+    INSTALL_PANEL=true
+    INSTALL_WINGS=false
+
     collect_panel_inputs
-    # Skip strict DNS check when Cloudflare will auto-create the record
+
     if [[ "${USE_CF:-n}" == "y" ]]; then
         info "Cloudflare mode — DNS record will be auto-created. Skipping pre-flight DNS check."
     else
         check_dns "$PANEL_DOMAIN"
     fi
-fi
 
-if [[ "${INSTALL_WINGS:-false}" == true ]]; then
-    collect_wings_inputs
-fi
-
-install_dependencies
-
-if [[ "${INSTALL_PANEL:-false}" == true ]]; then
+    install_dependencies
     setup_database
     install_panel_files
     configure_env
@@ -1019,11 +997,417 @@ if [[ "${INSTALL_PANEL:-false}" == true ]]; then
     setup_cloudflare
     setup_queue_worker
     setup_cron
-fi
+    configure_firewall
+    show_summary
 
-if [[ "${INSTALL_WINGS:-false}" == true ]]; then
+    echo ""
+    read -rp "$(echo -e "${YELLOW}Press Enter to return to menu...${NC}")"
+}
+
+# ── 2) Install Wings ─────────────────────────────────────────
+menu_install_wings() {
+    check_os
+    check_swap
+
+    INSTALL_PANEL=false
+    INSTALL_WINGS=true
+
+    collect_wings_inputs
+    install_dependencies
     install_wings
-fi
+    configure_firewall
+    show_summary
 
-configure_firewall
-show_summary
+    echo ""
+    read -rp "$(echo -e "${YELLOW}Press Enter to return to menu...${NC}")"
+}
+
+# ── 3) Uninstall ─────────────────────────────────────────────
+menu_uninstall() {
+    while true; do
+        clear
+        banner
+        echo -e "  ${RED}${BOLD}⚠  XCASPER Uninstaller — actions cannot be undone${NC}"
+        echo ""
+        echo -e "  ${CYAN}1)${NC} Uninstall Panel only"
+        echo -e "  ${CYAN}2)${NC} Uninstall Wings only"
+        echo -e "  ${CYAN}3)${NC} Uninstall Panel + Wings (full removal)"
+        echo -e "  ${CYAN}0)${NC} Back to main menu"
+        echo ""
+        ask "Choose [0-3]:"
+        read -r UNSUB
+
+        _do_uninstall_panel() {
+            step "Removing XCASPER Panel"
+            systemctl stop xcasper-queue 2>/dev/null || true
+            systemctl disable xcasper-queue 2>/dev/null || true
+            rm -f /etc/systemd/system/xcasper-queue.service
+            systemctl daemon-reload
+
+            crontab -l -u www-data 2>/dev/null \
+                | grep -v 'artisan schedule:run' \
+                | crontab -u www-data - 2>/dev/null || true
+
+            rm -rf /var/www/xcasper-panel
+            success "Panel files removed"
+
+            mysql -u root -e "DROP DATABASE IF EXISTS panel;" 2>/dev/null || true
+            mysql -u root -e "DROP USER IF EXISTS 'xcasper'@'127.0.0.1';" 2>/dev/null || true
+            mysql -u root -e "FLUSH PRIVILEGES;" 2>/dev/null || true
+            success "Database dropped"
+
+            rm -f /etc/nginx/sites-enabled/xcasper-panel.conf
+            rm -f /etc/nginx/sites-available/xcasper-panel.conf
+            nginx -t 2>/dev/null && systemctl reload nginx 2>/dev/null || true
+            success "Nginx config removed"
+        }
+
+        _do_uninstall_wings() {
+            step "Removing Wings Daemon"
+            systemctl stop wings 2>/dev/null || true
+            systemctl disable wings 2>/dev/null || true
+            rm -f /etc/systemd/system/wings.service
+            systemctl daemon-reload
+
+            rm -rf /etc/pterodactyl
+            rm -rf /var/lib/pterodactyl
+            rm -rf /var/log/pterodactyl
+            rm -f /usr/local/bin/wings
+            success "Wings removed"
+        }
+
+        case "$UNSUB" in
+            1)
+                ask "Type 'yes' to confirm panel removal:"
+                read -r CONF
+                if [[ "$CONF" == "yes" ]]; then _do_uninstall_panel
+                else warn "Cancelled."; fi
+                ;;
+            2)
+                ask "Type 'yes' to confirm Wings removal:"
+                read -r CONF
+                if [[ "$CONF" == "yes" ]]; then _do_uninstall_wings
+                else warn "Cancelled."; fi
+                ;;
+            3)
+                ask "Type 'yes' to confirm FULL removal (panel + wings):"
+                read -r CONF
+                if [[ "$CONF" == "yes" ]]; then
+                    _do_uninstall_panel
+                    _do_uninstall_wings
+                    success "Full removal complete"
+                else warn "Cancelled."; fi
+                ;;
+            0) return 0 ;;
+            *) warn "Invalid choice." ;;
+        esac
+        echo ""
+        read -rp "$(echo -e "${YELLOW}Press Enter to continue...${NC}")"
+    done
+}
+
+# ── 4) Cloudflare Setup ───────────────────────────────────────
+menu_cloudflare() {
+    while true; do
+        clear
+        banner
+        echo -e "  ${CYAN}${BOLD}☁  Cloudflare Tunnel Manager${NC}"
+        echo ""
+        echo -e "  ${CYAN}1)${NC} Install / Setup Tunnel"
+        echo -e "  ${CYAN}2)${NC} Uninstall Completely"
+        echo -e "  ${CYAN}0)${NC} Back to main menu"
+        echo ""
+        ask "Choose [0-2]:"
+        read -r CF_CHOICE
+
+        case "$CF_CHOICE" in
+            1)
+                clear
+                step "Installing cloudflared"
+
+                # Add repo and install
+                mkdir -p --mode=0755 /usr/share/keyrings
+                curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg \
+                    | tee /usr/share/keyrings/cloudflare-main.gpg > /dev/null
+                echo "deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] \
+https://pkg.cloudflare.com/cloudflared any main" \
+                    | tee /etc/apt/sources.list.d/cloudflared.list > /dev/null
+                apt-get update -qq
+                apt-get install -y cloudflared
+                success "cloudflared $(cloudflared --version 2>&1 | head -1 | awk '{print $3}')"
+
+                # Remove any stale service
+                if systemctl list-units --type=service 2>/dev/null | grep -q cloudflared; then
+                    warn "Existing cloudflared service found — removing before reinstall..."
+                    cloudflared service uninstall 2>/dev/null || true
+                    success "Old service removed"
+                fi
+
+                echo ""
+                echo -e "  ${DIM}Get your tunnel token from:${NC}"
+                echo -e "  ${DIM}Cloudflare Dashboard → Zero Trust → Networks → Tunnels${NC}"
+                echo -e "  ${DIM}Create tunnel → copy the 'cloudflared service install <TOKEN>' command${NC}"
+                echo ""
+                ask "Paste your tunnel token (or the full 'cloudflared service install ...' command):"
+                read -r USER_INPUT
+
+                # Strip the command prefix if user pasted the full command
+                CF_TUNNEL_TOKEN=$(echo "$USER_INPUT" \
+                    | sed 's/sudo cloudflared service install //g' \
+                    | sed 's/cloudflared service install //g' \
+                    | xargs)
+
+                if [[ -z "$CF_TUNNEL_TOKEN" ]]; then
+                    warn "Empty token — skipping service install."
+                else
+                    cloudflared service install "$CF_TUNNEL_TOKEN"
+                    sleep 2
+                    if systemctl is-active --quiet cloudflared; then
+                        success "Cloudflare Tunnel is running"
+                    else
+                        warn "Tunnel installed but not running. Check: systemctl status cloudflared"
+                    fi
+                fi
+
+                echo ""
+                read -rp "$(echo -e "${YELLOW}Press Enter to continue...${NC}")"
+                ;;
+            2)
+                clear
+                step "Uninstalling cloudflared"
+                cloudflared service uninstall 2>/dev/null || true
+                apt-get remove -y cloudflared 2>/dev/null || true
+                rm -f /etc/apt/sources.list.d/cloudflared.list
+                rm -f /usr/share/keyrings/cloudflare-main.gpg
+                success "cloudflared completely removed"
+                echo ""
+                read -rp "$(echo -e "${YELLOW}Press Enter to continue...${NC}")"
+                ;;
+            0) return 0 ;;
+            *) warn "Invalid choice."; sleep 1 ;;
+        esac
+    done
+}
+
+# ── 5) System Information ────────────────────────────────────
+menu_system_info() {
+    clear
+    banner
+    step "System Information"
+    divider
+
+    CPU_MODEL=$(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2 | xargs)
+    CPU_CORES=$(nproc)
+    RAM_USED=$(free -h | awk '/Mem:/ {print $3}')
+    RAM_TOTAL=$(free -h | awk '/Mem:/ {print $2}')
+    SWAP_USED=$(free -h | awk '/Swap:/ {print $3}')
+    SWAP_TOTAL=$(free -h | awk '/Swap:/ {print $2}')
+    DISK_USED=$(df -h / | awk 'NR==2 {print $3}')
+    DISK_TOTAL=$(df -h / | awk 'NR==2 {print $2}')
+    DISK_PCT=$(df -h / | awk 'NR==2 {print $5}')
+    UPTIME=$(uptime -p | sed 's/up //')
+    OS=$(lsb_release -d 2>/dev/null | cut -d: -f2 | xargs || uname -sr)
+    KERNEL=$(uname -r)
+    PUB_IP=$(curl -s4 https://ifconfig.me 2>/dev/null || echo "unknown")
+    HOSTNAME=$(hostname)
+
+    echo -e "  ${CYAN}Hostname:${NC}      $HOSTNAME"
+    echo -e "  ${CYAN}Public IP:${NC}     $PUB_IP"
+    echo -e "  ${CYAN}OS:${NC}            $OS"
+    echo -e "  ${CYAN}Kernel:${NC}        $KERNEL"
+    echo -e "  ${CYAN}Uptime:${NC}        $UPTIME"
+    divider
+    echo -e "  ${CYAN}CPU:${NC}           $CPU_MODEL ($CPU_CORES cores)"
+    echo -e "  ${CYAN}RAM:${NC}           ${RAM_USED} / ${RAM_TOTAL} used"
+    echo -e "  ${CYAN}Swap:${NC}          ${SWAP_USED} / ${SWAP_TOTAL} used"
+    echo -e "  ${CYAN}Disk (/):${NC}      ${DISK_USED} / ${DISK_TOTAL} (${DISK_PCT} used)"
+    divider
+
+    # Service statuses
+    for SVC in nginx mysql mariadb redis php8.3-fpm wings cloudflared tailscaled; do
+        STATUS=$(systemctl is-active "$SVC" 2>/dev/null || echo "not installed")
+        if [[ "$STATUS" == "active" ]]; then
+            echo -e "  ${CYAN}${SVC}:${NC} ${GREEN}running${NC}"
+        elif [[ "$STATUS" == "inactive" ]]; then
+            echo -e "  ${CYAN}${SVC}:${NC} ${YELLOW}stopped${NC}"
+        else
+            echo -e "  ${CYAN}${SVC}:${NC} ${DIM}not installed${NC}"
+        fi
+    done
+
+    divider
+    echo ""
+    read -rp "$(echo -e "${YELLOW}Press Enter to return to menu...${NC}")"
+}
+
+# ── 6) Tailscale VPN ─────────────────────────────────────────
+menu_tailscale() {
+    while true; do
+        clear
+        banner
+        TS_STATUS=$(systemctl is-active tailscaled 2>/dev/null || echo "not installed")
+        if [[ "$TS_STATUS" == "active" ]]; then
+            echo -e "  ${GREEN}${BOLD}Tailscale: RUNNING${NC}"
+        else
+            echo -e "  ${YELLOW}${BOLD}Tailscale: $TS_STATUS${NC}"
+        fi
+        echo ""
+        echo -e "  ${CYAN}1)${NC} Install Tailscale & Connect"
+        echo -e "  ${CYAN}2)${NC} Uninstall Tailscale"
+        echo -e "  ${CYAN}0)${NC} Back to main menu"
+        echo ""
+        ask "Choose [0-2]:"
+        read -r TS_CHOICE
+
+        case "$TS_CHOICE" in
+            1)
+                clear
+                step "Installing Tailscale"
+                curl -fsSL https://tailscale.com/install.sh | sh
+                systemctl enable --now tailscaled 2>/dev/null || true
+                success "Tailscale installed"
+                echo ""
+                info "Connecting to Tailscale network..."
+                echo -e "  ${DIM}Authenticate in your browser when prompted${NC}"
+                echo ""
+                tailscale up
+                echo ""
+                read -rp "$(echo -e "${YELLOW}Press Enter to continue...${NC}")"
+                ;;
+            2)
+                clear
+                step "Uninstalling Tailscale"
+                ask "Type 'yes' to confirm:"
+                read -r CONF
+                if [[ "$CONF" == "yes" ]]; then
+                    systemctl stop tailscaled 2>/dev/null || true
+                    systemctl disable tailscaled 2>/dev/null || true
+                    apt-get purge -y tailscale 2>/dev/null || true
+                    rm -rf /var/lib/tailscale /etc/tailscale /var/cache/tailscale
+                    apt-get autoremove -y 2>/dev/null || true
+                    success "Tailscale completely removed"
+                else
+                    warn "Cancelled."
+                fi
+                echo ""
+                read -rp "$(echo -e "${YELLOW}Press Enter to continue...${NC}")"
+                ;;
+            0) return 0 ;;
+            *) warn "Invalid choice."; sleep 1 ;;
+        esac
+    done
+}
+
+# ── 7) Database Setup ─────────────────────────────────────────
+menu_database() {
+    clear
+    banner
+    step "Database Setup — Add Remote MySQL User"
+    divider
+    echo -e "  ${DIM}Creates a MySQL user with remote access and opens port 3306.${NC}"
+    echo -e "  ${DIM}Useful for connecting an external panel or database manager.${NC}"
+    echo ""
+
+    ask "New database username:"
+    read -r DB_NEW_USER
+    [[ -z "$DB_NEW_USER" ]] && { warn "Username cannot be empty."; return; }
+
+    ask "Password for ${DB_NEW_USER}:"
+    read -rs DB_NEW_PASS
+    echo ""
+    [[ -z "$DB_NEW_PASS" ]] && { warn "Password cannot be empty."; return; }
+
+    info "Creating user '$DB_NEW_USER'..."
+    mysql -u root <<MYSQL_EOF
+CREATE USER IF NOT EXISTS '${DB_NEW_USER}'@'%' IDENTIFIED BY '${DB_NEW_PASS}';
+GRANT ALL PRIVILEGES ON *.* TO '${DB_NEW_USER}'@'%' WITH GRANT OPTION;
+FLUSH PRIVILEGES;
+MYSQL_EOF
+    success "User '${DB_NEW_USER}' created with remote access"
+
+    # Open remote bind-address
+    for CONF_FILE in \
+        /etc/mysql/mariadb.conf.d/50-server.cnf \
+        /etc/mysql/mysql.conf.d/mysqld.cnf \
+        /etc/mysql/my.cnf; do
+        if [[ -f "$CONF_FILE" ]]; then
+            sed -i 's/^bind-address.*/bind-address = 0.0.0.0/' "$CONF_FILE"
+            success "bind-address → 0.0.0.0 in $CONF_FILE"
+            break
+        fi
+    done
+
+    systemctl restart mysql 2>/dev/null || systemctl restart mariadb 2>/dev/null || true
+    success "MySQL/MariaDB restarted"
+
+    ufw allow 3306/tcp comment "MySQL Remote" 2>/dev/null || true
+    success "Port 3306 opened in firewall"
+
+    divider
+    echo -e "  ${CYAN}Host:${NC}      $(curl -s4 https://ifconfig.me 2>/dev/null || echo 'your-server-ip')"
+    echo -e "  ${CYAN}Port:${NC}      3306"
+    echo -e "  ${CYAN}User:${NC}      $DB_NEW_USER"
+    echo -e "  ${CYAN}Password:${NC}  (as entered above)"
+    divider
+    echo ""
+    read -rp "$(echo -e "${YELLOW}Press Enter to return to menu...${NC}")"
+}
+
+# ════════════════════════════════════════════════════════════
+#   MAIN MENU + ENTRY POINT
+# ════════════════════════════════════════════════════════════
+show_main_menu() {
+    clear
+    echo -e "${CYAN}${BOLD}"
+    echo " ██╗  ██╗ ██████╗ █████╗ ███████╗██████╗ ███████╗██████╗ "
+    echo " ╚██╗██╔╝██╔════╝██╔══██╗██╔════╝██╔══██╗██╔════╝██╔══██╗"
+    echo "  ╚███╔╝ ██║     ███████║███████╗██████╔╝█████╗  ██████╔╝"
+    echo "  ██╔██╗ ██║     ██╔══██║╚════██║██╔═══╝ ██╔══╝  ██╔══██╗"
+    echo " ██╔╝ ██╗╚██████╗██║  ██║███████║██║     ███████╗██║  ██║"
+    echo " ╚═╝  ╚═╝ ╚═════╝╚═╝  ╚═╝╚══════╝╚═╝     ╚══════╝╚═╝  ╚═╝"
+    echo -e "${NC}"
+    echo -e "${PURPLE}${BOLD}           XCASPER Hosting Manager${NC}"
+    echo -e "${DIM}           Docs: https://docs.xcasper.space${NC}"
+    echo -e "${DIM}           Repo: https://github.com/Casper-Tech-ke/xcasper-panel${NC}"
+    divider
+    echo ""
+    echo -e "  ${CYAN}${BOLD}1)${NC}  Panel Installation"
+    echo -e "  ${CYAN}${BOLD}2)${NC}  Wings Installation"
+    echo -e "  ${CYAN}${BOLD}3)${NC}  Uninstall Tools"
+    echo -e "  ${CYAN}${BOLD}4)${NC}  Cloudflare Setup"
+    echo -e "  ${CYAN}${BOLD}5)${NC}  System Information"
+    echo -e "  ${CYAN}${BOLD}6)${NC}  Tailscale VPN"
+    echo -e "  ${CYAN}${BOLD}7)${NC}  Database Setup (remote access)"
+    echo -e "  ${CYAN}${BOLD}0)${NC}  Exit"
+    echo ""
+    divider
+}
+
+# ── Entry point ───────────────────────────────────────────────
+check_root
+
+while true; do
+    show_main_menu
+    ask "Select an option [0-7]:"
+    read -r MAIN_CHOICE
+
+    case "$MAIN_CHOICE" in
+        1) menu_install_panel  ;;
+        2) menu_install_wings  ;;
+        3) menu_uninstall      ;;
+        4) menu_cloudflare     ;;
+        5) menu_system_info    ;;
+        6) menu_tailscale      ;;
+        7) menu_database       ;;
+        0)
+            echo ""
+            echo -e "${GREEN}${BOLD}  Goodbye from XCASPER Hosting!${NC}"
+            divider
+            exit 0
+            ;;
+        *)
+            warn "Invalid option — choose 0–7."
+            sleep 1
+            ;;
+    esac
+done

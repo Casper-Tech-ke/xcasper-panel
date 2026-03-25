@@ -2489,7 +2489,7 @@ menu_eggs() {
         echo -e "  ${DIM}Source: github.com/${EGG_REPO}${NC}"
         echo -e "  ${DIM}Eggs downloaded this session: ${DL_COUNT}${NC}"
         echo ""
-        echo -e "  ${CYAN}1)${NC} Generic       ${DIM}(Python, Node.js, Golang, Java, Rust runtime)${NC}"
+        echo -e "  ${CYAN}1)${NC} Generic       ${DIM}(Python, Node.js, XCASPER Node.js, Golang, Java, Rust)${NC}"
         echo -e "  ${CYAN}2)${NC} Bots          ${DIM}(JMusicBot, ATL Bot)${NC}"
         echo -e "  ${CYAN}3)${NC} Minecraft     ${DIM}(Paper, Vanilla, Forge, BungeeCord, Sponge)${NC}"
         echo -e "  ${CYAN}4)${NC} Rust Game     ${DIM}(Rust dedicated server)${NC}"

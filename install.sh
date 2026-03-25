@@ -649,10 +649,11 @@ set_permissions() {
 # ── Create Admin User ─────────────────────────────────────────
 create_admin_user() {
     step "Creating Admin Account"
+    detect_web_user
 
     cd /var/www/xcasper-panel
 
-    php artisan p:user:make \
+    sudo -u "${WEB_USER}" php artisan p:user:make \
         --email="$ADMIN_EMAIL" \
         --username="$ADMIN_USER" \
         --name-first="$ADMIN_FIRST" \
@@ -662,6 +663,120 @@ create_admin_user() {
         --no-interaction
 
     success "Admin account created: ${BOLD}$ADMIN_USER${NC}"
+}
+
+# ── Setup Super Admin Key ─────────────────────────────────────
+setup_super_admin_key() {
+    step "Super Admin Key Setup"
+    detect_web_user
+
+    PANEL_DIR="/var/www/xcasper-panel"
+
+    # Suggest a key or let the user pick one
+    SUGGESTED_KEY="CasperXK-$(tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 12)"
+    echo ""
+    echo -e "  ${DIM}The super admin key protects the ${BOLD}/super-admin${DIM} control panel.${NC}"
+    echo -e "  ${DIM}Keep this key secret — it grants full billing, plan, and user control.${NC}"
+    echo ""
+    ask "Super admin key (press Enter to auto-generate: ${BOLD}$SUGGESTED_KEY${NC}):"
+    read -r SUPER_KEY
+    SUPER_KEY="${SUPER_KEY:-$SUGGESTED_KEY}"
+
+    # Write / replace in .env
+    if grep -q "^XCASPER_SUPER_KEY=" "$PANEL_DIR/.env" 2>/dev/null; then
+        sed -i "s|^XCASPER_SUPER_KEY=.*|XCASPER_SUPER_KEY=${SUPER_KEY}|" "$PANEL_DIR/.env"
+    else
+        echo "XCASPER_SUPER_KEY=${SUPER_KEY}" >> "$PANEL_DIR/.env"
+    fi
+
+    # Clear cached config so the new key takes effect immediately
+    cd "$PANEL_DIR"
+    sudo -u "${WEB_USER}" php artisan config:clear --quiet 2>/dev/null || true
+
+    success "Super admin key saved: ${BOLD}$SUPER_KEY${NC}"
+    echo ""
+    echo -e "  ${CYAN}Super Admin URL:${NC}  ${BOLD}https://${PANEL_DOMAIN}/super-admin${NC}"
+    echo -e "  ${DIM}Enter the key above when prompted on that page to access billing,${NC}"
+    echo -e "  ${DIM}plans (Basic KES 50 / Pro KES 100 / Admin KES 200), wallets, and${NC}"
+    echo -e "  ${DIM}push notification settings.${NC}"
+    echo ""
+}
+
+# ── Mail Config (standalone helper — also used by menu) ───────
+_do_mail_config() {
+    PANEL_DIR="/var/www/xcasper-panel"
+    if [[ ! -d "$PANEL_DIR" ]]; then
+        warn "Panel not found at $PANEL_DIR — install the panel first."
+        echo ""
+        read -rp "$(echo -e "${YELLOW}Press Enter to continue...${NC}")"
+        return
+    fi
+    detect_web_user
+
+    echo ""
+    echo -e "  ${DIM}Common providers:${NC}"
+    echo -e "  ${DIM}  Gmail   → smtp.gmail.com         port 587  encryption: tls${NC}"
+    echo -e "  ${DIM}  Outlook → smtp.office365.com     port 587  encryption: tls${NC}"
+    echo -e "  ${DIM}  Brevo   → smtp-relay.brevo.com   port 587  encryption: tls${NC}"
+    echo -e "  ${DIM}  Mailgun → smtp.mailgun.org        port 587  encryption: tls${NC}"
+    echo ""
+
+    ask "SMTP Host (e.g. smtp.gmail.com):"
+    read -r MAIL_HOST
+    [[ -z "$MAIL_HOST" ]] && { warn "Host cannot be empty."; read -rp "Press Enter..."; return; }
+
+    ask "SMTP Port [default: 587]:"
+    read -r MAIL_PORT
+    MAIL_PORT="${MAIL_PORT:-587}"
+
+    ask "SMTP Username (usually your full email):"
+    read -r MAIL_USER
+    [[ -z "$MAIL_USER" ]] && { warn "Username cannot be empty."; read -rp "Press Enter..."; return; }
+
+    ask "SMTP Password:"
+    read -rs MAIL_PASS
+    echo ""
+    [[ -z "$MAIL_PASS" ]] && { warn "Password cannot be empty."; read -rp "Press Enter..."; return; }
+
+    ask "From Address [default: no-reply@${PANEL_DOMAIN:-yourdomain.com}]:"
+    read -r MAIL_FROM
+    MAIL_FROM="${MAIL_FROM:-no-reply@${PANEL_DOMAIN:-yourdomain.com}}"
+
+    ask "From Name [default: XCASPER Hosting]:"
+    read -r MAIL_NAME
+    MAIL_NAME="${MAIL_NAME:-XCASPER Hosting}"
+
+    ask "Encryption [tls/ssl/none] [default: tls]:"
+    read -r MAIL_ENC
+    MAIL_ENC="${MAIL_ENC:-tls}"
+
+    # Helper — update or append a .env key
+    _set_env_mail() {
+        local K="$1" V="$2"
+        if grep -q "^${K}=" "$PANEL_DIR/.env" 2>/dev/null; then
+            sed -i "s|^${K}=.*|${K}=${V}|" "$PANEL_DIR/.env"
+        else
+            echo "${K}=${V}" >> "$PANEL_DIR/.env"
+        fi
+    }
+
+    _set_env_mail "MAIL_DRIVER"       "smtp"
+    _set_env_mail "MAIL_HOST"         "$MAIL_HOST"
+    _set_env_mail "MAIL_PORT"         "$MAIL_PORT"
+    _set_env_mail "MAIL_USERNAME"     "$MAIL_USER"
+    _set_env_mail "MAIL_PASSWORD"     "$MAIL_PASS"
+    _set_env_mail "MAIL_ENCRYPTION"   "$MAIL_ENC"
+    _set_env_mail "MAIL_FROM_ADDRESS" "$MAIL_FROM"
+    _set_env_mail "MAIL_FROM_NAME"    "\"${MAIL_NAME}\""
+
+    cd "$PANEL_DIR"
+    sudo -u "${WEB_USER}" php artisan config:clear --quiet 2>/dev/null || true
+
+    success "SMTP configured"
+    echo ""
+    echo -e "  ${DIM}Test it: reset a user's password or create a new account — a verification${NC}"
+    echo -e "  ${DIM}email should arrive from ${BOLD}$MAIL_FROM${DIM}.${NC}"
+    echo ""
 }
 
 # ── Configure Nginx ───────────────────────────────────────────
@@ -1005,14 +1120,26 @@ install_wings() {
     info "Adding pterodactyl user to docker group..."
     usermod -aG docker pterodactyl 2>/dev/null || true
 
-    info "Downloading latest Wings binary..."
+    info "Downloading XCASPER Wings binary..."
     mkdir -p /etc/pterodactyl
 
-    WINGS_VERSION=$(curl -s "https://api.github.com/repos/pterodactyl/wings/releases/latest" \
-        | grep '"tag_name"' | cut -d '"' -f4)
-    curl -fsSL \
-        "https://github.com/pterodactyl/wings/releases/download/${WINGS_VERSION}/wings_linux_amd64" \
-        -o /usr/local/bin/wings
+    # ── Try our custom Wings release first; fall back to official Pterodactyl ──
+    XCASPER_WINGS_RELEASE=$(curl -sf \
+        "https://api.github.com/repos/Casper-Tech-ke/xcasper-wings/releases/latest" \
+        | grep '"tag_name"' | cut -d '"' -f4 || true)
+
+    if [[ -n "$XCASPER_WINGS_RELEASE" ]]; then
+        info "Found XCASPER Wings release: $XCASPER_WINGS_RELEASE"
+        WINGS_URL="https://github.com/Casper-Tech-ke/xcasper-wings/releases/download/${XCASPER_WINGS_RELEASE}/wings_linux_amd64"
+        WINGS_VERSION="$XCASPER_WINGS_RELEASE"
+    else
+        info "No XCASPER Wings release found — using official Pterodactyl Wings..."
+        WINGS_VERSION=$(curl -s "https://api.github.com/repos/pterodactyl/wings/releases/latest" \
+            | grep '"tag_name"' | cut -d '"' -f4)
+        WINGS_URL="https://github.com/pterodactyl/wings/releases/download/${WINGS_VERSION}/wings_linux_amd64"
+    fi
+
+    curl -fsSL "$WINGS_URL" -o /usr/local/bin/wings
     chmod +x /usr/local/bin/wings
     success "Wings $WINGS_VERSION installed at /usr/local/bin/wings"
 
@@ -1109,7 +1236,41 @@ SERVICE
     fi
 }
 
-# ── Summary ───────────────────────────────────────────────────
+# ── Post-install next-steps guidance ─────────────────────────
+_show_next_steps() {
+    echo ""
+    divider
+    echo -e "${YELLOW}${BOLD}  ── What to do next ──────────────────────────────────────${NC}"
+    echo ""
+    if [[ "${INSTALL_PANEL:-false}" == true ]]; then
+        echo -e "  ${GREEN}1.${NC} Open your panel in a browser:"
+        echo -e "     ${CYAN}${BOLD}https://${PANEL_DOMAIN}${NC}"
+        echo ""
+        echo -e "  ${GREEN}2.${NC} Log in with your admin credentials and verify everything loads."
+        echo ""
+        echo -e "  ${GREEN}3.${NC} Visit the ${BOLD}Super Admin${NC} panel to manage billing, plans & notifications:"
+        echo -e "     ${CYAN}${BOLD}https://${PANEL_DOMAIN}/super-admin${NC}"
+        echo -e "     ${DIM}(enter the super admin key you just set when prompted)${NC}"
+        echo ""
+        echo -e "  ${GREEN}4.${NC} In the Super Admin panel you can:"
+        echo -e "     ${DIM}• Activate / deactivate plans (Basic KES 50 · Pro KES 100 · Admin KES 200/mo)${NC}"
+        echo -e "     ${DIM}• Top up user KES wallets and view billing history${NC}"
+        echo -e "     ${DIM}• Send push notifications to all users${NC}"
+        echo -e "     ${DIM}• View Paystack transactions and manage subscriptions${NC}"
+        echo ""
+        if [[ -z "${MAIL_HOST:-}" ]]; then
+            echo -e "  ${GREEN}5.${NC} Configure SMTP mail (for email verification & password resets):"
+            echo -e "     Run the installer again → Panel Control Center → ${BOLD}Configure SMTP Mail${NC}"
+            echo -e "     or visit: ${CYAN}https://${PANEL_DOMAIN}/admin/settings/mail${NC}"
+            echo ""
+        fi
+        echo -e "  ${GREEN}6.${NC} Add game nodes: ${CYAN}https://${PANEL_DOMAIN}/admin/nodes${NC}"
+        echo -e "     ${DIM}Then run the installer again → Install Wings Daemon on each node server.${NC}"
+        echo ""
+    fi
+    divider
+}
+
 show_summary() {
     echo ""
     divider
@@ -1126,11 +1287,15 @@ show_summary() {
     divider
 
     if [[ "${INSTALL_PANEL:-false}" == true ]]; then
-        echo -e "${CYAN}  Panel URL:${NC}       ${BOLD}https://$PANEL_DOMAIN${NC}"
-        echo -e "${CYAN}  Admin Email:${NC}     ${BOLD}$ADMIN_EMAIL${NC}"
-        echo -e "${CYAN}  Admin Username:${NC}  ${BOLD}$ADMIN_USER${NC}"
-        echo -e "${CYAN}  Admin Password:${NC}  ${BOLD}$ADMIN_PASSWORD${NC}"
-        echo -e "${CYAN}  DB Password:${NC}     ${BOLD}$DB_PASSWORD${NC}"
+        echo -e "${CYAN}  Panel URL:${NC}        ${BOLD}https://$PANEL_DOMAIN${NC}"
+        echo -e "${CYAN}  Admin Email:${NC}      ${BOLD}$ADMIN_EMAIL${NC}"
+        echo -e "${CYAN}  Admin Username:${NC}   ${BOLD}$ADMIN_USER${NC}"
+        echo -e "${CYAN}  Admin Password:${NC}   ${BOLD}$ADMIN_PASSWORD${NC}"
+        echo -e "${CYAN}  DB Password:${NC}      ${BOLD}$DB_PASSWORD${NC}"
+        echo ""
+        echo -e "${CYAN}  Super Admin URL:${NC}  ${BOLD}https://$PANEL_DOMAIN/super-admin${NC}"
+        echo -e "${CYAN}  Super Admin Key:${NC}  ${BOLD}${SUPER_KEY:-see .env → XCASPER_SUPER_KEY}${NC}"
+        echo -e "  ${DIM}(Use this key to access billing, KES wallets, plans & push notifications)${NC}"
         echo ""
     fi
 
@@ -1151,11 +1316,15 @@ show_summary() {
     fi
 
     divider
-    echo -e "${YELLOW}${BOLD}  Important — Save Before Closing:${NC}"
-    echo -e "  • These credentials will not be shown again"
+    echo -e "${YELLOW}${BOLD}  Important — Save This Before Closing:${NC}"
+    echo -e "  ${DIM}These credentials will NOT be shown again.${NC}"
     if [[ "${INSTALL_PANEL:-false}" == true ]]; then
-        echo -e "  • Configure SMTP:  ${CYAN}https://$PANEL_DOMAIN/admin/settings/mail${NC}"
-        echo -e "  • Super Admin tab: Billing, plans, push notifications"
+        echo -e "  • Super Admin:  ${CYAN}https://$PANEL_DOMAIN/super-admin${NC}  (key above)"
+        if [[ -z "${MAIL_HOST:-}" ]]; then
+            echo -e "  • SMTP Mail:    Not yet configured — do it from the Panel Control Center menu"
+        else
+            echo -e "  • SMTP Mail:    ${GREEN}Configured ✓${NC}  (host: $MAIL_HOST)"
+        fi
     fi
     if [[ "${USE_CF:-n}" == "y" ]]; then
         echo -e "  • Wings nodes: keep DNS ${BOLD}grey cloud (not proxied)${NC} in Cloudflare"
@@ -1186,19 +1355,23 @@ menu_install_panel() {
         echo -e "  ${CYAN}1)${NC}  Install Panel (fresh)"
         echo -e "  ${CYAN}2)${NC}  Create Panel User"
         echo -e "  ${CYAN}3)${NC}  Update Panel (in-place upgrade)"
-        echo -e "  ${CYAN}4)${NC}  Uninstall Panel"
+        echo -e "  ${CYAN}4)${NC}  Configure SMTP Mail"
+        echo -e "  ${CYAN}5)${NC}  Change Super Admin Key"
+        echo -e "  ${CYAN}6)${NC}  Uninstall Panel"
         echo -e "  ${CYAN}0)${NC}  Back to main menu"
         echo ""
         divider
-        ask "Choose [0-4]:"
+        ask "Choose [0-6]:"
         read -r PANEL_CHOICE
 
         case "$PANEL_CHOICE" in
-            1) _panel_install   ;;
-            2) _panel_create_user ;;
-            3) _panel_update    ;;
-            4) _panel_uninstall ;;
-            0) return 0         ;;
+            1) _panel_install            ;;
+            2) _panel_create_user        ;;
+            3) _panel_update             ;;
+            4) _panel_mail_config        ;;
+            5) _panel_super_admin_key    ;;
+            6) _panel_uninstall          ;;
+            0) return 0                  ;;
             *) warn "Invalid choice."; sleep 1 ;;
         esac
     done
@@ -1227,13 +1400,30 @@ _panel_install() {
     configure_env
     set_permissions
     create_admin_user
+    setup_super_admin_key
     configure_nginx
     obtain_ssl
     setup_cloudflare
     setup_queue_worker
     setup_cron
     configure_firewall
+
+    # ── Optional SMTP setup right after install ────────────────
+    echo ""
+    divider
+    ask "Do you want to configure SMTP mail now? [y/N]:"
+    read -r SETUP_MAIL_NOW
+    if [[ "${SETUP_MAIL_NOW,,}" == "y" ]]; then
+        echo ""
+        step "SMTP Mail Setup"
+        divider
+        _do_mail_config
+    else
+        info "Skipped — you can configure mail later from the Panel Control Center menu."
+    fi
+
     show_summary
+    _show_next_steps
 
     echo ""
     read -rp "$(echo -e "${YELLOW}Press Enter to return to menu...${NC}")"
@@ -1261,6 +1451,52 @@ _panel_create_user() {
     sudo -u "${WEB_USER}" php artisan p:user:make
 
     success "User created successfully"
+    echo ""
+    read -rp "$(echo -e "${YELLOW}Press Enter to return to menu...${NC}")"
+}
+
+# ── Panel: mail config (menu wrapper) ────────────────────────
+_panel_mail_config() {
+    clear
+    banner
+    step "Configure SMTP Mail"
+    divider
+
+    # Need PANEL_DOMAIN for defaults inside _do_mail_config
+    PANEL_DOMAIN="${PANEL_DOMAIN:-$(grep -oP '(?<=server_name ).*(?=;)' /etc/nginx/sites-enabled/xcasper-panel 2>/dev/null | head -1 || echo 'panel.xcasper.space')}"
+
+    _do_mail_config
+
+    read -rp "$(echo -e "${YELLOW}Press Enter to return to menu...${NC}")"
+}
+
+# ── Panel: change super admin key (menu wrapper) ──────────────
+_panel_super_admin_key() {
+    clear
+    banner
+    step "Change Super Admin Key"
+    divider
+
+    PANEL_DIR="/var/www/xcasper-panel"
+    if [[ ! -d "$PANEL_DIR" ]]; then
+        warn "Panel not found at $PANEL_DIR — install the panel first."
+        echo ""
+        read -rp "$(echo -e "${YELLOW}Press Enter to continue...${NC}")"
+        return
+    fi
+
+    # Detect current domain from nginx config so the URL hint is accurate
+    PANEL_DOMAIN="${PANEL_DOMAIN:-$(grep -oP '(?<=server_name ).*(?=;)' /etc/nginx/sites-enabled/xcasper-panel 2>/dev/null | head -1 || echo 'panel.xcasper.space')}"
+
+    # Show current key if set
+    CURRENT_KEY=$(grep "^XCASPER_SUPER_KEY=" "$PANEL_DIR/.env" 2>/dev/null | cut -d= -f2-)
+    if [[ -n "$CURRENT_KEY" ]]; then
+        echo ""
+        echo -e "  ${DIM}Current key: ${BOLD}$CURRENT_KEY${NC}"
+    fi
+
+    setup_super_admin_key
+
     echo ""
     read -rp "$(echo -e "${YELLOW}Press Enter to return to menu...${NC}")"
 }

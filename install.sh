@@ -2489,32 +2489,38 @@ menu_eggs() {
         echo -e "  ${DIM}Source: github.com/${EGG_REPO}${NC}"
         echo -e "  ${DIM}Eggs downloaded this session: ${DL_COUNT}${NC}"
         echo ""
-        echo -e "  ${CYAN}1)${NC} Generic  ${DIM}(Python, Node.js, Golang, Java, Rust)${NC}"
-        echo -e "  ${CYAN}2)${NC} Bots     ${DIM}(Discord music bots, moderation)${NC}"
-        echo -e "  ${CYAN}3)${NC} Games    ${DIM}(Minecraft Paper)${NC}"
-        echo -e "  ${CYAN}4)${NC} Software ${DIM}(Uptime Kuma, Code Server)${NC}"
-        echo -e "  ${CYAN}5)${NC} Sync / Update all eggs from upstream"
-        echo -e "  ${CYAN}6)${NC} View downloaded eggs"
+        echo -e "  ${CYAN}1)${NC} Generic       ${DIM}(Python, Node.js, Golang, Java, Rust runtime)${NC}"
+        echo -e "  ${CYAN}2)${NC} Bots          ${DIM}(JMusicBot, ATL Bot)${NC}"
+        echo -e "  ${CYAN}3)${NC} Minecraft     ${DIM}(Paper, Vanilla, Forge, BungeeCord, Sponge)${NC}"
+        echo -e "  ${CYAN}4)${NC} Rust Game     ${DIM}(Rust dedicated server)${NC}"
+        echo -e "  ${CYAN}5)${NC} Source Engine ${DIM}(ARK, CS:GO, Garry's Mod, TF2, Insurgency)${NC}"
+        echo -e "  ${CYAN}6)${NC} Voice Servers ${DIM}(TeamSpeak3, Mumble)${NC}"
+        echo -e "  ${CYAN}7)${NC} Software      ${DIM}(Uptime Kuma, Code Server)${NC}"
+        echo -e "  ${CYAN}8)${NC} Sync / Update all eggs from upstream"
+        echo -e "  ${CYAN}9)${NC} View downloaded eggs"
         echo -e "  ${CYAN}0)${NC} Back to main menu"
         echo ""
         divider
-        ask "Choose [0-6]:"
+        ask "Choose [0-9]:"
         read -r EGG_MENU
 
         case "$EGG_MENU" in
-            1) _egg_category_menu "generic" "Generic Runtimes" ;;
-            2) _egg_category_menu "bots"    "Bots" ;;
-            3) _egg_category_menu "games"   "Games" ;;
-            4) _egg_category_menu "software" "Software" ;;
+            1) _egg_category_menu "generic"       "Generic Runtimes" ;;
+            2) _egg_category_menu "bots"          "Bots" ;;
+            3) _egg_category_menu "minecraft"     "Minecraft" ;;
+            4) _egg_category_menu "rust"          "Rust Game Server" ;;
+            5) _egg_category_menu "source-engine" "Source Engine Games" ;;
+            6) _egg_category_menu "voice-servers" "Voice Servers" ;;
+            7) _egg_category_menu "software"      "Software" ;;
 
-            5)
+            8)
                 clear
                 banner
                 step "Syncing all eggs from XCASPER repo"
                 divider
                 echo ""
                 TOTAL=0; UPDATED=0; FAILED=0
-                for CAT in generic bots games software; do
+                for CAT in generic bots minecraft rust source-engine voice-servers software; do
                     info "Syncing category: ${CAT}..."
                     mapfile -t SYNC_EGGS < <(_egg_list_category "$CAT")
                     for EGG in "${SYNC_EGGS[@]}"; do
@@ -2537,14 +2543,14 @@ menu_eggs() {
                 read -rp "$(echo -e "${YELLOW}Press Enter to continue...${NC}")"
                 ;;
 
-            6)
+            9)
                 clear
                 banner
                 step "Downloaded Eggs"
                 divider
                 echo ""
                 if [[ $(find "$EGG_DEST" -name "*.json" 2>/dev/null | wc -l) -eq 0 ]]; then
-                    warn "No eggs downloaded yet — use options 1–5 above."
+                    warn "No eggs downloaded yet — use options 1–8 above."
                 else
                     find "$EGG_DEST" -name "*.json" | sort | while read -r F; do
                         REL="${F#${EGG_DEST}/}"

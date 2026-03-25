@@ -364,12 +364,20 @@ install_panel_files() {
 
     # ── Step 2: Apply XCASPER customizations on top ──────────────────
     info "Applying XCASPER customizations..."
-    CUSTOM_ARCHIVE=$(mktemp --suffix=.tar.gz)
+    CUSTOM_DIR=$(mktemp -d)
 
-    curl -fsSL https://get.xcasper.space/xcasper-custom.tar.gz -o "$CUSTOM_ARCHIVE"
-    tar -xzf "$CUSTOM_ARCHIVE" -C "$PANEL_DIR"
-    rm -f "$CUSTOM_ARCHIVE"
+    git clone --depth 1 \
+        https://github.com/Casper-Tech-ke/xcasper-panel.git \
+        "$CUSTOM_DIR" --quiet
 
+    # Overlay XCASPER custom files onto the Pterodactyl base
+    for src_dir in app database/migrations resources; do
+        if [[ -d "$CUSTOM_DIR/$src_dir" ]]; then
+            cp -r "$CUSTOM_DIR/$src_dir/." "$PANEL_DIR/$src_dir/"
+        fi
+    done
+
+    rm -rf "$CUSTOM_DIR"
     success "XCASPER customizations applied (billing, super-admin, custom UI, push notifications)"
 
     # ── Step 3: Install dependencies & build ─────────────────────────

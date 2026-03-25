@@ -49,6 +49,8 @@ class RouteServiceProvider extends ServiceProvider
                 Route::post('/super-admin/users/unban', [SuperAdminController::class, 'unbanUser']);
                 Route::post('/super-admin/users/force-delete', [SuperAdminController::class, 'forceDeleteUser']);
                 Route::post('/super-admin/users/add-funds', [SuperAdminController::class, 'addFunds']);
+                Route::post('/super-admin/users/wallet-topup', [SuperAdminController::class, 'walletTopup']);
+                Route::post('/super-admin/users/upgrade-plan', [SuperAdminController::class, 'upgradePlan']);
                 Route::get('/super-admin/users', [SuperAdminController::class, 'users']);
                 Route::post('/super-admin/save-server-config', [SuperAdminController::class, 'saveServerConfig']);
                 Route::post('/super-admin/vapid/generate', [SuperAdminController::class, 'generateVapid']);

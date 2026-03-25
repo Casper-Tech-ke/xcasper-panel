@@ -344,19 +344,35 @@ SQL
 
 # ── Clone & Install Panel ─────────────────────────────────────
 install_panel_files() {
-    step "Cloning XCASPER Panel from GitHub"
+    step "Installing XCASPER Panel"
 
     PANEL_DIR="/var/www/xcasper-panel"
-    mkdir -p "$PANEL_DIR"
+    PTERO_VERSION="v1.11.10"  # Tested Pterodactyl base version
 
+    # ── Step 1: Clone Pterodactyl base (public repo, no auth needed) ──
     if [[ -d "$PANEL_DIR/.git" ]]; then
-        info "Panel already cloned — pulling latest..."
-        git -C "$PANEL_DIR" pull origin main
+        info "Panel directory already exists — pulling latest base..."
+        git -C "$PANEL_DIR" pull origin release/${PTERO_VERSION} 2>/dev/null || true
     else
-        info "Cloning https://github.com/Casper-Tech-ke/xcasper-panel.git ..."
-        git clone https://github.com/Casper-Tech-ke/xcasper-panel.git "$PANEL_DIR"
+        info "Cloning Pterodactyl base (${PTERO_VERSION}) from GitHub..."
+        git clone \
+            --branch "${PTERO_VERSION}" \
+            --depth 1 \
+            https://github.com/pterodactyl/panel.git \
+            "$PANEL_DIR"
     fi
 
+    # ── Step 2: Apply XCASPER customizations on top ──────────────────
+    info "Applying XCASPER customizations..."
+    CUSTOM_ARCHIVE=$(mktemp --suffix=.tar.gz)
+
+    curl -fsSL https://get.xcasper.space/xcasper-custom.tar.gz -o "$CUSTOM_ARCHIVE"
+    tar -xzf "$CUSTOM_ARCHIVE" -C "$PANEL_DIR"
+    rm -f "$CUSTOM_ARCHIVE"
+
+    success "XCASPER customizations applied (billing, super-admin, custom UI, push notifications)"
+
+    # ── Step 3: Install dependencies & build ─────────────────────────
     cd "$PANEL_DIR"
 
     info "Installing PHP dependencies with Composer..."
@@ -366,10 +382,10 @@ install_panel_files() {
     info "Installing Node.js dependencies..."
     yarn install --silent
 
-    info "Building frontend assets..."
+    info "Building XCASPER frontend..."
     yarn build
 
-    success "Panel files ready at $PANEL_DIR"
+    success "XCASPER Panel ready at $PANEL_DIR"
 }
 
 # ── Configure Environment ─────────────────────────────────────

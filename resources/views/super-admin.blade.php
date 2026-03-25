@@ -698,13 +698,14 @@
                     <div class="f" style="grid-column:1/-1">
                         <label>Default Egg ID</label>
                         <input type="number" name="default_egg_id" value="{{ $config['default_egg_id'] }}" placeholder="3" min="1">
-                        <span class="hint">The server <strong>egg</strong> (template) used when creating billing servers. Find it in Admin → Nests → Eggs → click an egg → URL: <code>/admin/nests/1/eggs/<strong>5</strong></code>.</span>
+                        <span class="hint">The <strong>fallback egg</strong> if no per-plan egg is set below. Egg IDs: 3 = XCASPER Node.js, 4 = XCASPER Python. Find more at Admin → Nests → Eggs → egg URL: <code>/admin/nests/1/eggs/<strong>5</strong></code>.</span>
                     </div>
                 </div>
 
                 <div style="margin-top:16px;">
                     <p style="font-size:11px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:var(--p);margin-bottom:12px;">🟢 Basic Plan — KES 50/mo</p>
                     <div class="fg">
+                        <div class="f"><label>Egg ID</label><input type="number" name="basic_egg_id" value="{{ $config['basic_egg_id'] ?? 3 }}" placeholder="3" min="1"><span class="hint">3=XCASPER Node.js &nbsp;|&nbsp; 4=XCASPER Python</span></div>
                         <div class="f"><label>RAM (MB)</label><input type="number" name="basic_memory_mb" value="{{ $config['basic_memory_mb'] }}" placeholder="512" min="0"><span class="hint">0 = unlimited. 512 = 512 MB RAM.</span></div>
                         <div class="f"><label>Disk (MB)</label><input type="number" name="basic_disk_mb" value="{{ $config['basic_disk_mb'] }}" placeholder="5120" min="0"><span class="hint">5120 = 5 GB. 10240 = 10 GB.</span></div>
                         <div class="f"><label>CPU (%)</label><input type="number" name="basic_cpu_pct" value="{{ $config['basic_cpu_pct'] }}" placeholder="50" min="0"><span class="hint">50 = half a core. 100 = 1 core. 0 = unlimited.</span></div>
@@ -714,6 +715,7 @@
                 <div style="margin-top:16px;">
                     <p style="font-size:11px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:#a78bfa;margin-bottom:12px;">🔵 Pro Plan — KES 100/mo</p>
                     <div class="fg">
+                        <div class="f"><label>Egg ID</label><input type="number" name="pro_egg_id" value="{{ $config['pro_egg_id'] ?? 3 }}" placeholder="3" min="1"><span class="hint">3=Node.js &nbsp;|&nbsp; 4=Python</span></div>
                         <div class="f"><label>RAM (MB)</label><input type="number" name="pro_memory_mb" value="{{ $config['pro_memory_mb'] }}" placeholder="2048" min="0"><span class="hint">0 = unlimited.</span></div>
                         <div class="f"><label>Disk (MB)</label><input type="number" name="pro_disk_mb" value="{{ $config['pro_disk_mb'] }}" placeholder="20480" min="0"><span class="hint">20480 = 20 GB.</span></div>
                         <div class="f"><label>CPU (%)</label><input type="number" name="pro_cpu_pct" value="{{ $config['pro_cpu_pct'] }}" placeholder="100" min="0"></div>
@@ -723,6 +725,7 @@
                 <div style="margin-top:16px;">
                     <p style="font-size:11px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:#fbbf24;margin-bottom:12px;">👑 Admin Plan — KES 200/mo</p>
                     <div class="fg">
+                        <div class="f"><label>Egg ID</label><input type="number" name="admin_egg_id" value="{{ $config['admin_egg_id'] ?? 3 }}" placeholder="3" min="1"><span class="hint">3=Node.js &nbsp;|&nbsp; 4=Python</span></div>
                         <div class="f"><label>RAM (MB)</label><input type="number" name="admin_memory_mb" value="{{ $config['admin_memory_mb'] }}" placeholder="4096" min="0"></div>
                         <div class="f"><label>Disk (MB)</label><input type="number" name="admin_disk_mb" value="{{ $config['admin_disk_mb'] }}" placeholder="51200" min="0"><span class="hint">51200 = 50 GB.</span></div>
                         <div class="f"><label>CPU (%)</label><input type="number" name="admin_cpu_pct" value="{{ $config['admin_cpu_pct'] }}" placeholder="200" min="0"></div>
@@ -740,7 +743,7 @@
             <div class="sec-title">User Management</div>
 
             <div class="info-box">
-                Search for any registered user and <strong>ban</strong>, <strong>unban</strong>, <strong>force-delete</strong>, or <strong>grant a plan + wallet credit</strong>. Banning prevents the user from logging in. Force-delete permanently removes all user data including billing records.
+                Search for any registered user by <strong>email or username</strong>. You can <strong>top up their wallet</strong>, <strong>upgrade their plan</strong>, ban, unban, or force-delete their account.
             </div>
 
             <div class="search-row">
@@ -754,14 +757,18 @@
                 <p style="color:rgba(148,163,184,.4);font-size:13px;text-align:center;padding:24px 0;">Enter a search term above to find users</p>
             </div>
 
-            <!-- Grant plan modal -->
-            <div id="grant-form" style="display:none;margin-top:20px;background:rgba(0,212,255,.05);border:1px solid rgba(0,212,255,.15);border-radius:14px;padding:20px;">
-                <p style="font-size:12px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:var(--p);margin-bottom:14px;">Grant Plan to <span id="grant-email" style="color:#fff;"></span></p>
-                <input type="hidden" id="grant-uid">
+            <!-- ── Upgrade Plan form ──────────────────────────────────────── -->
+            <div id="upgrade-form" style="display:none;margin-top:20px;background:rgba(124,58,237,.07);border:1px solid rgba(124,58,237,.25);border-radius:14px;padding:20px;">
+                <p style="font-size:12px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:#a855f7;margin-bottom:14px;">Upgrade Plan &mdash; <span id="upgrade-email" style="color:#fff;font-weight:400;letter-spacing:0;text-transform:none;"></span></p>
+                <input type="hidden" id="upgrade-uid">
+                <div style="margin-bottom:12px;">
+                    <label style="font-size:12px;color:#94a3b8;display:block;margin-bottom:5px;">Search by email or username (if not coming from user card)</label>
+                    <input type="text" id="upgrade-search" placeholder="email@example.com or username" style="width:100%;max-width:380px;">
+                </div>
                 <div class="fg">
                     <div class="f">
                         <label>Plan</label>
-                        <select id="grant-plan">
+                        <select id="upgrade-plan">
                             <option value="basic">Basic — KES 50/mo</option>
                             <option value="pro">Pro — KES 100/mo</option>
                             <option value="admin">Admin — KES 200/mo</option>
@@ -769,17 +776,39 @@
                     </div>
                     <div class="f">
                         <label>Duration (days)</label>
-                        <input type="number" id="grant-days" value="30" min="1" max="365">
-                    </div>
-                    <div class="f">
-                        <label>Wallet Credit (KES)</label>
-                        <input type="number" id="grant-wallet" value="0" min="0" step="1">
-                        <span class="hint">Optional: top up the user's KES wallet at the same time.</span>
+                        <input type="number" id="upgrade-days" value="30" min="1" max="365">
+                        <span class="hint">30 = one month. Plan activates immediately.</span>
                     </div>
                 </div>
                 <div style="display:flex;gap:10px;margin-top:14px;">
-                    <button class="btn-sm" onclick="submitGrant()">Grant Plan</button>
-                    <button class="btn-sm" onclick="document.getElementById('grant-form').style.display='none'" style="background:rgba(100,116,139,.2);color:#94a3b8;">Cancel</button>
+                    <button class="btn-sm" onclick="submitUpgrade()" style="background:linear-gradient(135deg,#7c3aed,#a855f7);">Upgrade Plan</button>
+                    <button class="btn-sm" onclick="document.getElementById('upgrade-form').style.display='none'" style="background:rgba(100,116,139,.2);color:#94a3b8;">Cancel</button>
+                </div>
+            </div>
+
+            <!-- ── Wallet Top-Up form ────────────────────────────────────────── -->
+            <div id="topup-form" style="display:none;margin-top:16px;background:rgba(5,150,105,.07);border:1px solid rgba(52,211,153,.25);border-radius:14px;padding:20px;">
+                <p style="font-size:12px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:#34d399;margin-bottom:14px;">Top Up Wallet &mdash; <span id="topup-email" style="color:#fff;font-weight:400;letter-spacing:0;text-transform:none;"></span></p>
+                <input type="hidden" id="topup-uid">
+                <div style="margin-bottom:12px;">
+                    <label style="font-size:12px;color:#94a3b8;display:block;margin-bottom:5px;">Search by email or username (if not coming from user card)</label>
+                    <input type="text" id="topup-search" placeholder="email@example.com or username" style="width:100%;max-width:380px;">
+                </div>
+                <div class="fg">
+                    <div class="f">
+                        <label>Amount (KES)</label>
+                        <input type="number" id="topup-amount" value="50" min="1" step="1">
+                        <span class="hint">Amount to add to the user's XCASPER wallet.</span>
+                    </div>
+                    <div class="f">
+                        <label>Note / Reason</label>
+                        <input type="text" id="topup-note" value="Admin top-up" placeholder="e.g. Compensation, bonus credit…">
+                        <span class="hint">Saved in the transaction log.</span>
+                    </div>
+                </div>
+                <div style="display:flex;gap:10px;margin-top:14px;">
+                    <button class="btn-sm" onclick="submitTopup()" style="background:linear-gradient(135deg,#059669,#34d399);color:#fff;">Add to Wallet</button>
+                    <button class="btn-sm" onclick="document.getElementById('topup-form').style.display='none'" style="background:rgba(100,116,139,.2);color:#94a3b8;">Cancel</button>
                 </div>
             </div>
         </div>
@@ -1134,7 +1163,8 @@ function renderUsers(users) {
                 <div style="margin-top:6px;display:flex;gap:5px;flex-wrap:wrap;">${planBadge} ${adminBadge} ${bannedBadge}</div>
             </div>
             <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;">
-                <button class="btn-sm" onclick="showGrant(${u.id},'${u.email}')">Grant Plan</button>
+                <button class="btn-sm" onclick="showUpgrade(${u.id},'${u.email}')" style="background:linear-gradient(135deg,#7c3aed,#a855f7);">Upgrade Plan</button>
+                <button class="btn-sm" onclick="showTopup(${u.id},'${u.email}')" style="background:linear-gradient(135deg,#059669,#34d399);color:#fff;">Top Up Wallet</button>
                 ${banBtn}
                 <button class="btn-sm btn-danger" onclick="forceDelete(${u.id},'${u.email}')">Delete</button>
             </div>
@@ -1142,25 +1172,58 @@ function renderUsers(users) {
     }).join('');
 }
 
-function showGrant(uid, email) {
-    document.getElementById('grant-uid').value = uid;
-    document.getElementById('grant-email').textContent = email;
-    document.getElementById('grant-form').style.display = 'block';
-    document.getElementById('grant-form').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+function showUpgrade(uid, email) {
+    document.getElementById('upgrade-uid').value = uid;
+    document.getElementById('upgrade-email').textContent = email;
+    document.getElementById('upgrade-search').value = '';
+    document.getElementById('topup-form').style.display = 'none';
+    document.getElementById('upgrade-form').style.display = 'block';
+    document.getElementById('upgrade-form').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 }
 
-function submitGrant() {
-    const uid    = parseInt(document.getElementById('grant-uid').value);
-    const plan   = document.getElementById('grant-plan').value;
-    const days   = parseInt(document.getElementById('grant-days').value) || 30;
-    const wallet = parseFloat(document.getElementById('grant-wallet').value) || 0;
-    post('/super-admin/users/add-funds', { user_id: uid, plan, days, wallet_kes: wallet })
+function submitUpgrade() {
+    const uid    = parseInt(document.getElementById('upgrade-uid').value) || 0;
+    const search = document.getElementById('upgrade-search').value.trim();
+    const plan   = document.getElementById('upgrade-plan').value;
+    const days   = parseInt(document.getElementById('upgrade-days').value) || 30;
+    if (!uid && !search) { alert('Enter a user ID, email, or username.'); return; }
+    post('/super-admin/users/upgrade-plan', { user_id: uid, search, plan, days })
         .then(d => {
             alert(d.message || d.error || 'Done');
-            document.getElementById('grant-form').style.display = 'none';
+            document.getElementById('upgrade-form').style.display = 'none';
+            document.getElementById('upgrade-uid').value = 0;
             searchUsers();
         });
 }
+
+function showTopup(uid, email) {
+    document.getElementById('topup-uid').value = uid;
+    document.getElementById('topup-email').textContent = email;
+    document.getElementById('topup-search').value = '';
+    document.getElementById('upgrade-form').style.display = 'none';
+    document.getElementById('topup-form').style.display = 'block';
+    document.getElementById('topup-form').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+function submitTopup() {
+    const uid    = parseInt(document.getElementById('topup-uid').value) || 0;
+    const search = document.getElementById('topup-search').value.trim();
+    const amount = parseFloat(document.getElementById('topup-amount').value) || 0;
+    const note   = document.getElementById('topup-note').value.trim();
+    if (!uid && !search) { alert('Enter a user ID, email, or username.'); return; }
+    if (amount <= 0) { alert('Amount must be greater than 0.'); return; }
+    post('/super-admin/users/wallet-topup', { user_id: uid, search, amount_kes: amount, note })
+        .then(d => {
+            alert(d.message || d.error || 'Done');
+            document.getElementById('topup-form').style.display = 'none';
+            document.getElementById('topup-uid').value = 0;
+            searchUsers();
+        });
+}
+
+/* Keep legacy submitGrant for backward compatibility */
+function showGrant(uid, email) { showUpgrade(uid, email); }
+function submitGrant() { submitUpgrade(); }
 
 function ban(uid) {
     const reason = prompt('Ban reason (shown to user):', 'Banned by administrator');

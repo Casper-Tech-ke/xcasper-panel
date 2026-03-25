@@ -55,6 +55,9 @@ class SuperAdminController extends Controller
             'admin_server_limit' => 'unlimited',
             'default_node_id'    => 1,
             'default_egg_id'     => 3,
+            'basic_egg_id'       => 3,
+            'pro_egg_id'         => 3,
+            'admin_egg_id'       => 3,
             'basic_memory_mb'    => 512,
             'basic_disk_mb'      => 5120,
             'basic_cpu_pct'      => 50,
@@ -380,6 +383,121 @@ class SuperAdminController extends Controller
         ]);
     }
 
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Wallet Top-Up Only (no plan change)
+    // POST /super-admin/users/wallet-topup
+    // ─────────────────────────────────────────────────────────────────────────
+    public function walletTopup(Request $request): JsonResponse
+    {
+        if (!$this->isUnlocked($request)) {
+            return response()->json(['error' => 'Unauthorized'], 403);
+        }
+
+        $search    = trim($request->input('search', ''));
+        $userId    = (int) $request->input('user_id', 0);
+        $amountKes = (float) $request->input('amount_kes', 0);
+        $note      = trim($request->input('note', 'Admin wallet top-up'));
+
+        if ($amountKes <= 0) {
+            return response()->json(['error' => 'Amount must be greater than 0'], 422);
+        }
+
+        // Find user by id, email, or username
+        $user = $userId > 0 ? User::find($userId) : null;
+        if (!$user && $search !== '') {
+            $user = User::where('email', $search)
+                        ->orWhere('username', $search)
+                        ->first();
+        }
+        if (!$user) {
+            return response()->json(['error' => 'User not found. Search by email or username.'], 404);
+        }
+
+        $wallet = XcasperWallet::forUser($user->id);
+        $wallet->credit($amountKes);
+
+        XcasperTransaction::create([
+            'user_id'     => $user->id,
+            'amount_kes'  => $amountKes,
+            'type'        => 'admin_topup',
+            'plan'        => null,
+            'reference'   => 'TOPUP-' . strtoupper(\Illuminate\Support\Str::random(8)) . '-' . time(),
+            'description' => $note ?: 'Admin wallet top-up',
+            'status'      => 'success',
+        ]);
+
+        $newBalance = round(XcasperWallet::forUser($user->id)->balance_kes, 2);
+
+        return response()->json([
+            'success' => true,
+            'message' => "Added KES {$amountKes} to {$user->email}'s wallet. New balance: KES {$newBalance}.",
+        ]);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Upgrade / Grant Plan Only (no wallet change)
+    // POST /super-admin/users/upgrade-plan
+    // ─────────────────────────────────────────────────────────────────────────
+    public function upgradePlan(Request $request): JsonResponse
+    {
+        if (!$this->isUnlocked($request)) {
+            return response()->json(['error' => 'Unauthorized'], 403);
+        }
+
+        $search = trim($request->input('search', ''));
+        $userId = (int) $request->input('user_id', 0);
+        $plan   = $request->input('plan', 'basic');
+        $days   = (int) $request->input('days', 30);
+
+        // Find user by id, email, or username
+        $user = $userId > 0 ? User::find($userId) : null;
+        if (!$user && $search !== '') {
+            $user = User::where('email', $search)
+                        ->orWhere('username', $search)
+                        ->first();
+        }
+        if (!$user) {
+            return response()->json(['error' => 'User not found. Search by email or username.'], 404);
+        }
+
+        $plans = XcasperBilling::getPlans();
+        if (!isset($plans[$plan])) {
+            return response()->json(['error' => 'Invalid plan'], 422);
+        }
+
+        $billing = XcasperBilling::firstOrNew(['user_id' => $user->id]);
+        $billing->plan               = $plan;
+        $billing->status             = 'active';
+        $billing->paystack_reference = 'ADMIN-UPGRADE-' . time();
+        $billing->amount_paid_kes    = 0;
+        $billing->started_at         = now();
+        $billing->expires_at         = now()->addDays($days);
+        $billing->reminder_sent      = false;
+        $billing->save();
+
+        if ($plan === 'admin') {
+            $user->root_admin = true;
+            $user->save();
+        }
+
+        XcasperTransaction::create([
+            'user_id'     => $user->id,
+            'amount_kes'  => 0,
+            'type'        => 'admin_grant',
+            'plan'        => $plan,
+            'reference'   => $billing->paystack_reference,
+            'description' => "Admin upgraded to {$plans[$plan]['label']} for {$days} days",
+            'status'      => 'success',
+        ]);
+
+        return response()->json([
+            'success' => true,
+            'message' => "Upgraded {$user->email} to {$plans[$plan]['label']} for {$days} days.",
+        ]);
+    }
+
+
     public function saveServerConfig(Request $request): RedirectResponse
     {
         if (!$this->isUnlocked($request)) {
@@ -389,7 +507,7 @@ class SuperAdminController extends Controller
         $existing = self::getConfig();
 
         $fields = [
-            'default_node_id', 'default_egg_id',
+            'default_node_id', 'default_egg_id', 'basic_egg_id', 'pro_egg_id', 'admin_egg_id',
             'basic_memory_mb', 'basic_disk_mb', 'basic_cpu_pct',
             'pro_memory_mb',   'pro_disk_mb',   'pro_cpu_pct',
             'admin_memory_mb', 'admin_disk_mb', 'admin_cpu_pct',

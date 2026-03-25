@@ -2,55 +2,61 @@
 
 > Customized Pterodactyl v1.11 — built by [Casper Tech Kenya](https://xcasper.space)
 
-A fully themed, production-ready game server hosting panel with KES billing, browser push notifications, and a powerful super-admin control interface.
+A fully themed, production-ready game server hosting panel with KES billing, browser push notifications, and a 9-tab super-admin control interface.
 
 ## ✨ Features
 
-- **Dark XCASPER Theme** — custom CSS variable theming (primary/accent/bg colours changeable without rebuild)
-- **Paystack KES Billing** — Basic KES 50/mo, Pro KES 100/mo, Admin KES 200/mo
+- **Dark XCASPER Theme** — CSS variable theming (primary/accent/bg colours change instantly without rebuilding)
+- **Paystack KES Billing** — Basic KES 50/mo · Pro KES 100/mo · Admin KES 200/mo
 - **KES Wallet System** — auto-renewal with wallet balance
 - **Browser Push Notifications** — Web Push VAPID standard
-- **Super Admin Panel** — 9-tab control centre (Branding, Appearance, Email, Billing, Users, Revenue, Push, Docs, Support)
-- **Email Spam Protection** — 6-layer validation (domain allowlist, Gmail format rules, 30+ fake prefix blocks, MX DNS check)
-- **Live Colour Preview** — pick colours and see the login card update in real-time
-- **Add Server Button** — users can provision servers directly from dashboard
-- **Animated Casper Background** — friendly ghost animation on login/register
+- **Super Admin Panel** — 9 tabs: Branding · Appearance · Email · Billing · Users · Revenue · Push · Docs · Support
+- **Email Spam Protection** — 6-layer validation (domain allowlist, Gmail rules, 30+ fake prefix blocks, MX DNS check)
+- **Live Colour Preview** — real-time login card preview with 8 colour presets
+- **Add Server Button** — users provision servers directly from dashboard
+- **Animated Casper Background** — friendly ghost animation with particles and stars
 
-## 🎨 Custom Files
+## 📁 Key Customized Files (in this repo)
 
 | File | Description |
 |------|-------------|
-| `resources/scripts/components/auth/LoginFormContainer.tsx` | Login page with animated ghost, welcome popup, particles |
-| `resources/scripts/components/auth/LoginContainer.tsx` | Login form with CSS variable theming |
-| `resources/scripts/components/auth/RegisterContainer.tsx` | Register form with CSS variable theming |
+| `resources/scripts/components/auth/LoginFormContainer.tsx` | Animated login page: ghost, welcome popup, particles |
+| `resources/scripts/components/auth/LoginContainer.tsx` | Login form with dynamic CSS variable theming |
+| `resources/scripts/components/auth/RegisterContainer.tsx` | Register form with dynamic CSS variable theming |
 | `resources/views/super-admin.blade.php` | 9-tab super-admin control panel |
-| `resources/views/layouts/xcasper-bg.blade.php` | Animated Casper canvas background |
-| `resources/views/templates/wrapper.blade.php` | Injects CSS colour variables into every page |
-| `app/Http/Controllers/SuperAdminController.php` | Full super-admin API + config management |
+| `resources/views/layouts/xcasper-bg.blade.php` | HTML5 canvas animated Casper ghost background |
+| `resources/views/templates/wrapper.blade.php` | CSS variable injection wrapper |
+| `app/Http/Controllers/SuperAdminController.php` | Super-admin API: config, users, revenue, VAPID |
 | `app/Http/Controllers/Auth/RegisterController.php` | 6-layer email spam protection |
-| `app/Http/Controllers/Billing/` | Paystack payment, wallet, subscription controllers |
-| `resources/views/billing/` | Billing dashboard, wallet, plan selection views |
+| `app/Providers/RouteServiceProvider.php` | All custom XCASPER routes |
 
-## 🚀 Deployment
+## 🚀 Live Deployment
 
-Deployed at: [panel.xcasper.space](https://panel.xcasper.space)  
-Node: [node.xcasper.space](https://node.xcasper.space)  
-Status: [status.xcasper.space](https://status.xcasper.space)
+| Service | URL |
+|---------|-----|
+| Panel | [panel.xcasper.space](https://panel.xcasper.space) |
+| Node | [node.xcasper.space:8080](https://node.xcasper.space:8080) |
+| Status | [status.xcasper.space](https://status.xcasper.space) |
+| Support | [t.me/casper_tech_ke](https://t.me/casper_tech_ke) |
 
 ## 🔑 Super Admin
 
-Visit `/super-admin` and enter the key `CasperXK-2025` (change via `XCASPER_SUPER_KEY` in `.env`).
+Visit `/super-admin` — default key: `CasperXK-2025`  
+Change via `XCASPER_SUPER_KEY=your-key` in `.env`
 
-## 📦 Stack
+## 📦 Tech Stack
 
-- **Framework**: Laravel 9 + Pterodactyl v1.11
-- **Frontend**: React 18 + TypeScript + styled-components
-- **Build**: Webpack / Yarn
-- **DB**: MySQL / SQLite
-- **Billing**: Paystack (KES)
-- **Push**: Web Push / VAPID
-- **Mail**: SMTP (Brevo)
+Laravel 9 · React 18 · TypeScript · styled-components · Webpack · Paystack · Web Push (VAPID) · Brevo SMTP · Nginx · Let's Encrypt
+
+## 🛠 Quick Build
+
+```bash
+composer install --no-dev --optimize-autoloader
+yarn install && yarn build
+php artisan migrate --force
+php artisan view:clear
+```
 
 ---
 
-*A CASPER TECH KENYA DEVELOPERS product — © 2025-2026 Casper Tech Kenya*
+*A CASPER TECH KENYA DEVELOPERS product — © 2025-2026 Casper Tech Kenya. All rights reserved.*

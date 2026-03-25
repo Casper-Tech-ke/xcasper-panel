@@ -1849,78 +1849,188 @@ menu_cloudflare() {
     while true; do
         clear
         banner
-        echo -e "  ${CYAN}${BOLD}☁  Cloudflare Tunnel Manager${NC}"
+
+        # ── Live status badge ─────────────────────────────────
+        CF_SVC_STATUS=$(systemctl is-active cloudflared 2>/dev/null || echo "not installed")
+        CF_VER=$(cloudflared --version 2>&1 | head -1 | awk '{print $3}' 2>/dev/null || true)
+        if [[ "$CF_SVC_STATUS" == "active" ]]; then
+            echo -e "  ${GREEN}${BOLD}☁  Cloudflare Tunnel: RUNNING${NC}  ${DIM}($CF_VER)${NC}"
+        elif [[ "$CF_SVC_STATUS" == "inactive" ]]; then
+            echo -e "  ${YELLOW}${BOLD}☁  Cloudflare Tunnel: STOPPED${NC}  ${DIM}($CF_VER)${NC}"
+        else
+            echo -e "  ${DIM}☁  Cloudflare Tunnel: not installed${NC}"
+        fi
         echo ""
         echo -e "  ${CYAN}1)${NC} Install / Setup Tunnel"
-        echo -e "  ${CYAN}2)${NC} Uninstall Completely"
+        echo -e "  ${CYAN}2)${NC} Status & Logs"
+        echo -e "  ${CYAN}3)${NC} Restart Tunnel"
+        echo -e "  ${CYAN}4)${NC} Uninstall Completely"
         echo -e "  ${CYAN}0)${NC} Back to main menu"
         echo ""
-        ask "Choose [0-2]:"
+        divider
+        ask "Choose [0-4]:"
         read -r CF_CHOICE
 
         case "$CF_CHOICE" in
             1)
                 clear
-                step "Installing cloudflared"
+                banner
+                step "Installing Cloudflared"
+                divider
 
-                # Add repo and install
-                mkdir -p --mode=0755 /usr/share/keyrings
-                curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg \
-                    | tee /usr/share/keyrings/cloudflare-main.gpg > /dev/null
-                echo "deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] \
+                # ── Step 1: Install package (cross-distro) ────
+                info "Step 1: Installing cloudflared package..."
+                if command -v cloudflared &>/dev/null; then
+                    info "cloudflared already installed — skipping package install"
+                else
+                    if [[ "${PKG_FAMILY:-apt}" == "apt" ]]; then
+                        mkdir -p --mode=0755 /usr/share/keyrings
+                        curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg \
+                            | tee /usr/share/keyrings/cloudflare-main.gpg > /dev/null
+                        echo "deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] \
 https://pkg.cloudflare.com/cloudflared any main" \
-                    | tee /etc/apt/sources.list.d/cloudflared.list > /dev/null
-                apt-get update -qq
-                apt-get install -y cloudflared
+                            | tee /etc/apt/sources.list.d/cloudflared.list > /dev/null
+                        apt-get update -qq
+                        apt-get install -y cloudflared
+                    else
+                        # RPM-based (AlmaLinux / Rocky / CentOS)
+                        curl -fsSL https://pkg.cloudflare.com/cloudflared-ascii.repo \
+                            | tee /etc/yum.repos.d/cloudflared.repo > /dev/null
+                        if command -v dnf &>/dev/null; then
+                            dnf install -y cloudflared
+                        else
+                            yum install -y cloudflared
+                        fi
+                    fi
+                fi
+
+                if ! command -v cloudflared &>/dev/null; then
+                    warn "cloudflared installation failed — check your internet or OS."
+                    echo ""
+                    read -rp "$(echo -e "${YELLOW}Press Enter to continue...${NC}")"
+                    continue
+                fi
                 success "cloudflared $(cloudflared --version 2>&1 | head -1 | awk '{print $3}')"
 
-                # Remove any stale service
+                # ── Step 2: Remove any stale service ──────────
+                info "Step 2: Checking for existing service..."
                 if systemctl list-units --type=service 2>/dev/null | grep -q cloudflared; then
                     warn "Existing cloudflared service found — removing before reinstall..."
                     cloudflared service uninstall 2>/dev/null || true
                     success "Old service removed"
+                else
+                    info "No existing service found — clean install"
                 fi
 
+                # ── Step 3: Prompt for tunnel token ───────────
                 echo ""
-                echo -e "  ${DIM}Get your tunnel token from:${NC}"
-                echo -e "  ${DIM}Cloudflare Dashboard → Zero Trust → Networks → Tunnels${NC}"
-                echo -e "  ${DIM}Create tunnel → copy the 'cloudflared service install <TOKEN>' command${NC}"
+                info "Step 3: Configure tunnel token"
                 echo ""
-                ask "Paste your tunnel token (or the full 'cloudflared service install ...' command):"
+                echo -e "  ${DIM}Get your token from:${NC}"
+                echo -e "  ${BOLD}Cloudflare Dashboard → Zero Trust → Networks → Tunnels${NC}"
+                echo -e "  ${DIM}Create or select a tunnel → Install connector → copy the token${NC}"
+                echo -e "  ${DIM}You can paste the full 'cloudflared service install <TOKEN>' command or just the token.${NC}"
+                echo ""
+                ask "Paste tunnel token (or full install command):"
                 read -r USER_INPUT
 
-                # Strip the command prefix if user pasted the full command
                 CF_TUNNEL_TOKEN=$(echo "$USER_INPUT" \
                     | sed 's/sudo cloudflared service install //g' \
                     | sed 's/cloudflared service install //g' \
                     | xargs)
 
                 if [[ -z "$CF_TUNNEL_TOKEN" ]]; then
-                    warn "Empty token — skipping service install."
+                    warn "Empty token — service not installed. Run this menu again when you have your token."
                 else
+                    # ── Step 4: Install and start service ─────
+                    info "Step 4: Installing and starting tunnel service..."
                     cloudflared service install "$CF_TUNNEL_TOKEN"
                     sleep 2
                     if systemctl is-active --quiet cloudflared; then
-                        success "Cloudflare Tunnel is running"
+                        success "Cloudflare Tunnel is running!"
                     else
-                        warn "Tunnel installed but not running. Check: systemctl status cloudflared"
+                        warn "Service installed but not running yet."
+                        echo -e "  ${DIM}Check: ${BOLD}systemctl status cloudflared${NC}"
+                        echo -e "  ${DIM}Logs:  ${BOLD}journalctl -u cloudflared -f${NC}"
                     fi
                 fi
 
                 echo ""
-                read -rp "$(echo -e "${YELLOW}Press Enter to continue...${NC}")"
-                ;;
-            2)
-                clear
-                step "Uninstalling cloudflared"
-                cloudflared service uninstall 2>/dev/null || true
-                apt-get remove -y cloudflared 2>/dev/null || true
-                rm -f /etc/apt/sources.list.d/cloudflared.list
-                rm -f /usr/share/keyrings/cloudflare-main.gpg
-                success "cloudflared completely removed"
+                divider
+                echo -e "  ${CYAN}Status:${NC}  ${BOLD}systemctl status cloudflared${NC}"
+                echo -e "  ${CYAN}Logs:${NC}    ${BOLD}journalctl -u cloudflared -f${NC}"
+                echo -e "  ${CYAN}Restart:${NC} ${BOLD}systemctl restart cloudflared${NC}"
                 echo ""
                 read -rp "$(echo -e "${YELLOW}Press Enter to continue...${NC}")"
                 ;;
+
+            2)
+                clear
+                banner
+                step "Cloudflare Tunnel Status"
+                divider
+                echo ""
+                if ! command -v cloudflared &>/dev/null; then
+                    warn "cloudflared is not installed."
+                else
+                    echo -e "  ${CYAN}Service status:${NC}"
+                    systemctl status cloudflared --no-pager -l 2>/dev/null || true
+                    echo ""
+                    divider
+                    echo -e "  ${CYAN}Recent logs (last 20 lines):${NC}"
+                    journalctl -u cloudflared -n 20 --no-pager 2>/dev/null || true
+                fi
+                echo ""
+                read -rp "$(echo -e "${YELLOW}Press Enter to continue...${NC}")"
+                ;;
+
+            3)
+                clear
+                banner
+                step "Restarting Cloudflare Tunnel"
+                divider
+                if ! command -v cloudflared &>/dev/null; then
+                    warn "cloudflared is not installed."
+                else
+                    systemctl restart cloudflared 2>/dev/null || true
+                    sleep 2
+                    if systemctl is-active --quiet cloudflared; then
+                        success "Cloudflare Tunnel restarted and running"
+                    else
+                        warn "Restart attempted but service is not active."
+                        echo -e "  ${DIM}Check: ${BOLD}journalctl -u cloudflared -f${NC}"
+                    fi
+                fi
+                echo ""
+                read -rp "$(echo -e "${YELLOW}Press Enter to continue...${NC}")"
+                ;;
+
+            4)
+                clear
+                banner
+                step "Uninstalling Cloudflared"
+                divider
+                ask "Type 'yes' to confirm full removal:"
+                read -r CF_CONFIRM
+                if [[ "$CF_CONFIRM" != "yes" ]]; then
+                    warn "Cancelled."
+                else
+                    cloudflared service uninstall 2>/dev/null || true
+                    if [[ "${PKG_FAMILY:-apt}" == "apt" ]]; then
+                        apt-get remove -y cloudflared 2>/dev/null || true
+                    else
+                        dnf remove -y cloudflared 2>/dev/null || \
+                            yum remove -y cloudflared 2>/dev/null || true
+                    fi
+                    rm -f /etc/apt/sources.list.d/cloudflared.list
+                    rm -f /usr/share/keyrings/cloudflare-main.gpg
+                    rm -f /etc/yum.repos.d/cloudflared.repo
+                    success "cloudflared completely removed"
+                fi
+                echo ""
+                read -rp "$(echo -e "${YELLOW}Press Enter to continue...${NC}")"
+                ;;
+
             0) return 0 ;;
             *) warn "Invalid choice."; sleep 1 ;;
         esac
@@ -1983,53 +2093,197 @@ menu_tailscale() {
     while true; do
         clear
         banner
+
+        # ── Live status badge with IP ─────────────────────────
         TS_STATUS=$(systemctl is-active tailscaled 2>/dev/null || echo "not installed")
+        TS_IP=$(tailscale ip -4 2>/dev/null || true)
         if [[ "$TS_STATUS" == "active" ]]; then
-            echo -e "  ${GREEN}${BOLD}Tailscale: RUNNING${NC}"
+            echo -e "  ${GREEN}${BOLD}🔒 Tailscale VPN: RUNNING${NC}"
+            [[ -n "$TS_IP" ]] && echo -e "  ${CYAN}Tailscale IP:${NC} ${BOLD}$TS_IP${NC}"
+        elif [[ "$TS_STATUS" == "inactive" ]]; then
+            echo -e "  ${YELLOW}${BOLD}🔒 Tailscale VPN: STOPPED${NC}"
         else
-            echo -e "  ${YELLOW}${BOLD}Tailscale: $TS_STATUS${NC}"
+            echo -e "  ${DIM}🔒 Tailscale VPN: not installed${NC}"
         fi
         echo ""
         echo -e "  ${CYAN}1)${NC} Install Tailscale & Connect"
-        echo -e "  ${CYAN}2)${NC} Uninstall Tailscale"
+        echo -e "  ${CYAN}2)${NC} Reconnect / Re-authenticate"
+        echo -e "  ${CYAN}3)${NC} Status & Info"
+        echo -e "  ${CYAN}4)${NC} Uninstall Tailscale"
         echo -e "  ${CYAN}0)${NC} Back to main menu"
         echo ""
-        ask "Choose [0-2]:"
+        divider
+        ask "Choose [0-4]:"
         read -r TS_CHOICE
 
         case "$TS_CHOICE" in
             1)
                 clear
+                banner
                 step "Installing Tailscale"
-                curl -fsSL https://tailscale.com/install.sh | sh
-                systemctl enable --now tailscaled 2>/dev/null || true
-                success "Tailscale installed"
+                divider
+
+                if command -v tailscale &>/dev/null; then
+                    info "Tailscale is already installed — skipping download"
+                else
+                    # ── Step 1: Download & install ───────────────
+                    echo ""
+                    info "Step 1: Downloading and installing Tailscale..."
+                    if curl -fsSL https://tailscale.com/install.sh | sh; then
+                        success "Tailscale downloaded and installed"
+                    else
+                        warn "Tailscale install script failed."
+                        echo ""
+                        read -rp "$(echo -e "${YELLOW}Press Enter to continue...${NC}")"
+                        continue
+                    fi
+                fi
+
+                # ── Step 2: Enable & start daemon ────────────────
                 echo ""
-                info "Connecting to Tailscale network..."
-                echo -e "  ${DIM}Authenticate in your browser when prompted${NC}"
+                info "Step 2: Starting Tailscale daemon..."
+                systemctl enable --now tailscaled 2>/dev/null || true
+                sleep 1
+                if systemctl is-active --quiet tailscaled; then
+                    success "tailscaled service running"
+                else
+                    warn "tailscaled not running — trying to start..."
+                    systemctl start tailscaled 2>/dev/null || true
+                fi
+
+                # ── Step 3: Connect to network ────────────────────
+                echo ""
+                info "Step 3: Connecting to Tailscale network..."
+                echo ""
+                echo -e "  ${DIM}A browser authentication URL will appear below.${NC}"
+                echo -e "  ${DIM}Open it in your browser to approve this machine.${NC}"
                 echo ""
                 tailscale up
+                sleep 2
+
+                # ── Show results ──────────────────────────────────
+                TS_NEW_IP=$(tailscale ip -4 2>/dev/null || true)
+                echo ""
+                divider
+                echo -e "${GREEN}${BOLD}  Tailscale Connected!${NC}"
+                echo ""
+                if [[ -n "$TS_NEW_IP" ]]; then
+                    echo -e "  ${CYAN}Your Tailscale IP:${NC}  ${BOLD}$TS_NEW_IP${NC}"
+                    echo -e "  ${DIM}Other devices on your Tailnet can reach this server at that IP.${NC}"
+                fi
+                echo ""
+                echo -e "  ${CYAN}Status:${NC}  ${BOLD}tailscale status${NC}"
+                echo -e "  ${CYAN}Peers:${NC}   ${BOLD}tailscale status --peers${NC}"
+                echo -e "  ${CYAN}Ping:${NC}    ${BOLD}tailscale ping <peer-ip>${NC}"
+                echo ""
+                divider
                 echo ""
                 read -rp "$(echo -e "${YELLOW}Press Enter to continue...${NC}")"
                 ;;
+
             2)
                 clear
-                step "Uninstalling Tailscale"
-                ask "Type 'yes' to confirm:"
-                read -r CONF
-                if [[ "$CONF" == "yes" ]]; then
-                    systemctl stop tailscaled 2>/dev/null || true
-                    systemctl disable tailscaled 2>/dev/null || true
-                    apt-get purge -y tailscale 2>/dev/null || true
-                    rm -rf /var/lib/tailscale /etc/tailscale /var/cache/tailscale
-                    apt-get autoremove -y 2>/dev/null || true
-                    success "Tailscale completely removed"
+                banner
+                step "Reconnect / Re-authenticate Tailscale"
+                divider
+
+                if ! command -v tailscale &>/dev/null; then
+                    warn "Tailscale is not installed — use option 1 first."
                 else
-                    warn "Cancelled."
+                    echo ""
+                    echo -e "  ${DIM}This will log this machine out and open a new auth URL.${NC}"
+                    ask "Force re-login (clears existing session)? [y/N]:"
+                    read -r TS_RELOGIN
+
+                    if [[ "${TS_RELOGIN,,}" == "y" ]]; then
+                        tailscale logout 2>/dev/null || true
+                        info "Logged out — reconnecting..."
+                    else
+                        info "Reconnecting with existing account..."
+                    fi
+
+                    systemctl start tailscaled 2>/dev/null || true
+                    tailscale up
+                    sleep 2
+
+                    TS_RECO_IP=$(tailscale ip -4 2>/dev/null || true)
+                    echo ""
+                    if [[ -n "$TS_RECO_IP" ]]; then
+                        success "Reconnected — Tailscale IP: ${BOLD}$TS_RECO_IP${NC}"
+                    else
+                        warn "May not have connected yet — check browser auth."
+                    fi
                 fi
                 echo ""
                 read -rp "$(echo -e "${YELLOW}Press Enter to continue...${NC}")"
                 ;;
+
+            3)
+                clear
+                banner
+                step "Tailscale Status & Info"
+                divider
+
+                if ! command -v tailscale &>/dev/null; then
+                    warn "Tailscale is not installed."
+                else
+                    echo ""
+                    echo -e "  ${CYAN}Service:${NC}  $(systemctl is-active tailscaled 2>/dev/null || echo 'stopped')"
+                    TS_DISP_IP=$(tailscale ip -4 2>/dev/null || echo 'n/a')
+                    echo -e "  ${CYAN}IP:${NC}       ${BOLD}$TS_DISP_IP${NC}"
+                    echo ""
+                    divider
+                    echo -e "  ${CYAN}Connected peers:${NC}"
+                    tailscale status 2>/dev/null || echo "  (run 'tailscale up' to connect)"
+                    echo ""
+                    divider
+                    echo -e "  ${CYAN}Recent logs:${NC}"
+                    journalctl -u tailscaled -n 15 --no-pager 2>/dev/null || true
+                fi
+                echo ""
+                read -rp "$(echo -e "${YELLOW}Press Enter to continue...${NC}")"
+                ;;
+
+            4)
+                clear
+                banner
+                step "Uninstalling Tailscale"
+                divider
+                echo ""
+                echo -e "  ${RED}This will completely remove Tailscale and all its configuration.${NC}"
+                echo ""
+                ask "Type 'yes' to confirm:"
+                read -r TS_CONF
+
+                if [[ "$TS_CONF" != "yes" ]]; then
+                    warn "Cancelled — Tailscale was NOT removed."
+                else
+                    info "Step 1: Stopping and disabling service..."
+                    systemctl stop tailscaled 2>/dev/null || true
+                    systemctl disable tailscaled 2>/dev/null || true
+                    success "Service stopped"
+
+                    info "Step 2: Removing package..."
+                    if [[ "${PKG_FAMILY:-apt}" == "apt" ]]; then
+                        apt-get purge -y tailscale 2>/dev/null || true
+                        apt-get autoremove -y 2>/dev/null || true
+                    else
+                        dnf remove -y tailscale 2>/dev/null || \
+                            yum remove -y tailscale 2>/dev/null || true
+                    fi
+                    success "Package removed"
+
+                    info "Step 3: Cleaning up files..."
+                    rm -rf /var/lib/tailscale /etc/tailscale /var/cache/tailscale
+                    success "Files cleaned"
+
+                    echo ""
+                    success "Tailscale completely removed"
+                fi
+                echo ""
+                read -rp "$(echo -e "${YELLOW}Press Enter to continue...${NC}")"
+                ;;
+
             0) return 0 ;;
             *) warn "Invalid choice."; sleep 1 ;;
         esac

@@ -36,7 +36,7 @@ XCASPER Panel is a **heavily customized fork of [Pterodactyl v1.11](https://pter
 | 🛡 **Email Spam Protection** | 6-layer validation: domain allowlist, Gmail format rules, 30+ fake prefix blocks, MX DNS |
 | 🖥 **Animated Background** | Friendly Casper ghost canvas animation with particles and stars |
 | 🚀 **Add Server Button** | Users provision servers directly from their dashboard |
-| 🎨 **Live Colour Preview** | Real-time login card preview with 8 colour presets in Super Admin |
+| 🔀 **Git Clone** | Clone any Git repo directly into server files from the browser |
 
 ---
 
@@ -48,6 +48,7 @@ xcasper-panel/
 │   ├── Http/Controllers/
 │   │   ├── Auth/RegisterController.php          ← 6-layer email spam protection
 │   │   ├── Billing/                              ← Paystack, Wallet, Subscription
+│   │   ├── Servers/GitCloneController.php        ← Git clone via file manager
 │   │   └── SuperAdminController.php             ← 9-tab admin API
 │   ├── Services/Billing/
 │   │   ├── PushNotificationService.php          ← VAPID Web Push
@@ -60,7 +61,7 @@ xcasper-panel/
 │   │   └── RegisterContainer.tsx                ← Dynamic themed form
 │   └── views/
 │       ├── super-admin.blade.php                ← 9-tab control panel
-│       ├── templates/wrapper.blade.php          ← CSS variable injection
+│       ├── templates/wrapper.blade.php          ← CSS variable injection + Git Clone button
 │       └── layouts/xcasper-bg.blade.php         ← Casper canvas animation
 └── database/migrations/
     ├── *_create_xcasper_billing_table.php
@@ -69,14 +70,24 @@ xcasper-panel/
 
 ---
 
-## 🌐 Live Deployment
+## 🌐 Live Services
 
 | Service | URL |
 |---------|-----|
-| 🖥 Panel | [panel.xcasper.space](https://panel.xcasper.space) |
-| ⚙ Node | [node.xcasper.space:8080](https://node.xcasper.space:8080) |
-| 📊 Status | [status.xcasper.space](https://status.xcasper.space) |
-| 💬 Support | [t.me/casper_tech_ke](https://t.me/casper_tech_ke) |
+| 👻 Panel | [panel.xcasper.space](https://panel.xcasper.space) |
+| 📚 Docs | [docs.xcasper.space](https://docs.xcasper.space) |
+| 📡 Status | [status.xcasper.space](https://status.xcasper.space) |
+| 🎫 Support | [support.xcasper.space](https://support.xcasper.space) |
+| ☕ Buy Me a Coffee | [payments.xcasper.space](https://payments.xcasper.space) |
+| 🔧 Installer | [get.xcasper.space](https://get.xcasper.space) |
+
+---
+
+## ☕ Support This Project
+
+If XCASPER has been useful to you, consider buying us a coffee — KES payments via Paystack, no foreign card needed.
+
+[![Buy Me a Coffee](https://img.shields.io/badge/☕_Buy_Me_a_Coffee-KES_via_Paystack-7C3AED?style=for-the-badge)](https://payments.xcasper.space)
 
 ---
 
@@ -99,9 +110,17 @@ Navigate to `/super-admin` on your panel and enter the access key.
 
 | Document | Description |
 |----------|-------------|
-| [DEPLOY.md](DEPLOY.md) | Full production deployment guide (Nginx, SSL, systemd, cron) |
-| [SECURITY.md](SECURITY.md) | Security policy and responsible disclosure |
-| [CONTRIBUTING.md](CONTRIBUTING.md) | How to contribute to this project |
+| [docs.xcasper.space](https://docs.xcasper.space) | Full online documentation |
+| [XCASPER.md](XCASPER.md) | All custom features explained |
+| [DEPLOY.md](DEPLOY.md) | Full production deployment guide |
+
+---
+
+## 🚀 Quick Install
+
+```bash
+bash <(curl -s https://get.xcasper.space)
+```
 
 ---
 
@@ -109,8 +128,9 @@ Navigate to `/super-admin` on your panel and enter the access key.
 
 ### 👻 Built with love in Kenya
 
-[![Telegram](https://img.shields.io/badge/Telegram-Support-00D4FF?style=flat-square&logo=telegram)](https://t.me/casper_tech_ke)
-[![Website](https://img.shields.io/badge/Website-xcasper.space-7C3AED?style=flat-square)](https://xcasper.space)
+[![Buy Me a Coffee](https://img.shields.io/badge/☕_Support_XCASPER-payments.xcasper.space-7C3AED?style=flat-square)](https://payments.xcasper.space)
+[![Status](https://img.shields.io/badge/All_Services-status.xcasper.space-4ade80?style=flat-square)](https://status.xcasper.space)
+[![Support](https://img.shields.io/badge/🎫_Support-support.xcasper.space-00D4FF?style=flat-square)](https://support.xcasper.space)
 [![GitHub](https://img.shields.io/badge/GitHub-@Casper--Tech--ke-000?style=flat-square&logo=github)](https://github.com/Casper-Tech-ke)
 
 **© 2025–2026 Casper Tech Kenya Developers. All rights reserved.**

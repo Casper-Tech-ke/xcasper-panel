@@ -276,12 +276,23 @@ install_dependencies() {
         redis-server \
         dnsutils
 
-    # PHP 8.3 — add repo only if not already present
+    # PHP 8.3 — add repo for Ubuntu (Ondrej PPA) or Debian (SURY)
     info "Adding PHP 8.3 repository..."
-    PHP_LIST="/etc/apt/sources.list.d/ondrej-ubuntu-php-$(lsb_release -cs).list"
-    if [[ ! -f "$PHP_LIST" ]]; then
-        LC_ALL=C.UTF-8 add-apt-repository -y ppa:ondrej/php
-        apt-get update -y -qq
+    OS_ID=$(lsb_release -is 2>/dev/null | tr '[:upper:]' '[:lower:]')
+    if [[ "$OS_ID" == "ubuntu" ]]; then
+        PHP_LIST="/etc/apt/sources.list.d/ondrej-ubuntu-php-$(lsb_release -cs).list"
+        if [[ ! -f "$PHP_LIST" ]]; then
+            LC_ALL=C.UTF-8 add-apt-repository -y ppa:ondrej/php
+            apt-get update -y -qq
+        fi
+    elif [[ "$OS_ID" == "debian" ]]; then
+        if [[ ! -f "/etc/apt/sources.list.d/sury-php.list" ]]; then
+            curl -fsSL https://packages.sury.org/php/apt.gpg \
+                | gpg --dearmor -o /usr/share/keyrings/sury-php.gpg
+            echo "deb [signed-by=/usr/share/keyrings/sury-php.gpg] https://packages.sury.org/php/ $(lsb_release -cs) main" \
+                | tee /etc/apt/sources.list.d/sury-php.list > /dev/null
+            apt-get update -y -qq
+        fi
     fi
 
     info "Installing PHP 8.3 and all required extensions..."
@@ -969,8 +980,36 @@ show_summary() {
 #   MENU ACTIONS
 # ════════════════════════════════════════════════════════════
 
-# ── 1) Install Panel ─────────────────────────────────────────
+# ── 1) Panel submenu ─────────────────────────────────────────
 menu_install_panel() {
+    while true; do
+        clear
+        banner
+        echo -e "  ${CYAN}${BOLD}🐲  XCASPER Panel Control Center${NC}"
+        echo ""
+        echo -e "  ${CYAN}1)${NC}  Install Panel (fresh)"
+        echo -e "  ${CYAN}2)${NC}  Create Panel User"
+        echo -e "  ${CYAN}3)${NC}  Update Panel (in-place upgrade)"
+        echo -e "  ${CYAN}4)${NC}  Uninstall Panel"
+        echo -e "  ${CYAN}0)${NC}  Back to main menu"
+        echo ""
+        divider
+        ask "Choose [0-4]:"
+        read -r PANEL_CHOICE
+
+        case "$PANEL_CHOICE" in
+            1) _panel_install   ;;
+            2) _panel_create_user ;;
+            3) _panel_update    ;;
+            4) _panel_uninstall ;;
+            0) return 0         ;;
+            *) warn "Invalid choice."; sleep 1 ;;
+        esac
+    done
+}
+
+# ── Panel: fresh install ──────────────────────────────────────
+_panel_install() {
     check_os
     check_swap
     check_ports
@@ -1000,6 +1039,143 @@ menu_install_panel() {
     configure_firewall
     show_summary
 
+    echo ""
+    read -rp "$(echo -e "${YELLOW}Press Enter to return to menu...${NC}")"
+}
+
+# ── Panel: create user ────────────────────────────────────────
+_panel_create_user() {
+    clear
+    banner
+    step "Create Panel User"
+    divider
+
+    PANEL_DIR="/var/www/xcasper-panel"
+    if [[ ! -d "$PANEL_DIR" ]]; then
+        warn "Panel not found at $PANEL_DIR — please install the panel first."
+        echo ""
+        read -rp "$(echo -e "${YELLOW}Press Enter to continue...${NC}")"
+        return
+    fi
+
+    info "Running artisan user creation wizard..."
+    echo ""
+    cd "$PANEL_DIR"
+    sudo -u www-data php artisan p:user:make
+
+    success "User created successfully"
+    echo ""
+    read -rp "$(echo -e "${YELLOW}Press Enter to return to menu...${NC}")"
+}
+
+# ── Panel: update in-place ────────────────────────────────────
+_panel_update() {
+    clear
+    banner
+    step "Update XCASPER Panel"
+    divider
+
+    PANEL_DIR="/var/www/xcasper-panel"
+    if [[ ! -d "$PANEL_DIR" ]]; then
+        warn "Panel not found at $PANEL_DIR — please install first."
+        echo ""
+        read -rp "$(echo -e "${YELLOW}Press Enter to continue...${NC}")"
+        return
+    fi
+
+    LATEST=$(curl -s "https://api.github.com/repos/pterodactyl/panel/releases/latest" \
+        | grep '"tag_name"' | cut -d'"' -f4)
+    info "Latest Pterodactyl base: ${BOLD}$LATEST${NC}"
+
+    ask "Continue with update? This will put the panel briefly into maintenance mode. [y/N]:"
+    read -r UP_CONFIRM
+    [[ "${UP_CONFIRM,,}" != "y" ]] && { warn "Update cancelled."; read -rp "Press Enter..."; return; }
+
+    cd "$PANEL_DIR"
+
+    info "Enabling maintenance mode..."
+    sudo -u www-data php artisan down
+
+    info "Pulling latest Pterodactyl base ($LATEST)..."
+    curl -fsSL "https://github.com/pterodactyl/panel/releases/download/${LATEST}/panel.tar.gz" \
+        | tar -xz --strip-components=1
+
+    info "Re-applying XCASPER customizations..."
+    CUSTOM_DIR=$(mktemp -d)
+    git clone --depth 1 https://github.com/Casper-Tech-ke/xcasper-panel.git "$CUSTOM_DIR" --quiet
+    for src_dir in app database/migrations resources; do
+        if [[ -d "$CUSTOM_DIR/$src_dir" ]]; then
+            cp -r "$CUSTOM_DIR/$src_dir/." "$PANEL_DIR/$src_dir/"
+        fi
+    done
+    rm -rf "$CUSTOM_DIR"
+    success "XCASPER customizations re-applied"
+
+    info "Running composer install..."
+    COMPOSER_ALLOW_SUPERUSER=1 composer install --no-dev --optimize-autoloader --quiet
+
+    info "Clearing caches..."
+    sudo -u www-data php artisan view:clear
+    sudo -u www-data php artisan config:clear
+    sudo -u www-data php artisan route:clear
+
+    info "Running migrations..."
+    sudo -u www-data php artisan migrate --seed --force
+
+    info "Setting permissions..."
+    chmod -R 755 storage/* bootstrap/cache/
+    chown -R www-data:www-data "$PANEL_DIR"
+
+    info "Restarting queue worker..."
+    sudo -u www-data php artisan queue:restart
+    systemctl restart xcasper-queue 2>/dev/null || true
+
+    info "Taking panel out of maintenance mode..."
+    sudo -u www-data php artisan up
+
+    success "Panel updated to $LATEST with XCASPER customizations"
+    echo ""
+    read -rp "$(echo -e "${YELLOW}Press Enter to return to menu...${NC}")"
+}
+
+# ── Panel: uninstall ──────────────────────────────────────────
+_panel_uninstall() {
+    clear
+    banner
+    echo -e "  ${RED}${BOLD}⚠  This will permanently remove the XCASPER Panel${NC}"
+    echo ""
+    ask "Type 'yes' to confirm panel removal:"
+    read -r CONF
+    if [[ "$CONF" != "yes" ]]; then
+        warn "Cancelled."
+        read -rp "$(echo -e "${YELLOW}Press Enter to continue...${NC}")"
+        return
+    fi
+
+    step "Removing XCASPER Panel"
+    systemctl stop xcasper-queue 2>/dev/null || true
+    systemctl disable xcasper-queue 2>/dev/null || true
+    rm -f /etc/systemd/system/xcasper-queue.service
+    systemctl daemon-reload
+
+    crontab -l -u www-data 2>/dev/null \
+        | grep -v 'artisan schedule:run' \
+        | crontab -u www-data - 2>/dev/null || true
+
+    rm -rf /var/www/xcasper-panel
+    success "Panel files removed"
+
+    mysql -u root -e "DROP DATABASE IF EXISTS panel;" 2>/dev/null || true
+    mysql -u root -e "DROP USER IF EXISTS 'xcasper'@'127.0.0.1';" 2>/dev/null || true
+    mysql -u root -e "FLUSH PRIVILEGES;" 2>/dev/null || true
+    success "Database dropped"
+
+    rm -f /etc/nginx/sites-enabled/xcasper-panel.conf
+    rm -f /etc/nginx/sites-available/xcasper-panel.conf
+    nginx -t 2>/dev/null && systemctl reload nginx 2>/dev/null || true
+    success "Nginx config removed"
+
+    success "Panel fully uninstalled"
     echo ""
     read -rp "$(echo -e "${YELLOW}Press Enter to return to menu...${NC}")"
 }
